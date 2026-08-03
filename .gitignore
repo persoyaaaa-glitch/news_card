@@ -1,0 +1,33 @@
+# Secrets - never commit these
+.env
+.env.*
+!.env.example
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+
+# Local-only state files (now superseded by Supabase app_state for the
+# GitHub Actions setup, but still ignored in case daily_scheduler.py
+# --run-forever / hourly_run.py is ever run locally again)
+scheduler_state.json
+theme_state.json
+token_state.json
+
+# Generated output - regenerated every run, no reason to version it
+output/*.jpg
+output/*.jpeg
+output/*.png
+tmp_images/*.jpg
+tmp_images/*.jpeg
+tmp_images/*.png
+!output/.gitkeep
+!tmp_images/.gitkeep
+
+# OS/editor cruft
+.DS_Store
+.vscode/
+.idea/

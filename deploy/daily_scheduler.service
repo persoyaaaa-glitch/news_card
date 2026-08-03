@@ -1,0 +1,19 @@
+[Unit]
+Description=News carousel Instagram bot (daily scheduler)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Adjust this path if you clone the project somewhere other than /opt/news_card
+WorkingDirectory=/opt/news_card
+EnvironmentFile=/opt/news_card/.env
+ExecStart=/opt/news_card/.venv/bin/python daily_scheduler.py
+Restart=always
+RestartSec=15
+# Don't let a crash-looping bot spam restarts forever
+StartLimitIntervalSec=600
+StartLimitBurst=10
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,10 @@
+[build]
+builder = "NIXPACKS"
+
+[deploy]
+startCommand = "python hourly_run.py"
+restartPolicyType = "NEVER"
+
+# Note: the cron schedule itself is NOT set here - Railway wants that set
+# in the dashboard: Service -> Settings -> Cron Schedule -> "0 * * * *"
+# (that expression = once every hour, on the hour, in UTC).
