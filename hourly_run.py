@@ -39,7 +39,7 @@ from image_fetch import get_article_image_from_resolved_url, resolve_article_url
 from article_extract import get_carousel_slide_texts, extract_article_paragraphs
 from card_generator import build_carousel, HEADLINE_THEMES
 from supabase_client import is_duplicate_story, get_recent_titles, mark_as_posted, upload_carousel_images, get_state, save_state
-from instagram_publish import post_carousel_to_instagram, post_to_instagram
+from instagram_publish import post_carousel_to_instagram, post_to_instagram, find_recent_matching_post
 from ai_text import (
     generate_hook_and_detail, generate_caption_and_hashtags,
     format_instagram_caption, generate_digest_caption_and_hashtags,
@@ -728,6 +728,21 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
             media_id = post_to_instagram(public_urls[0], caption)
     except Exception as e:
         print(f"  -> Instagram publish failed: {e}")
+        print(f"  -> checking the account's recent media in case it actually posted "
+              f"despite the error (Meta sometimes returns an error for a call that "
+              f"succeeded server-side)...")
+        media_id = find_recent_matching_post(caption)
+        if media_id:
+            print(f"  -> confirmed: post {media_id} actually went live despite the error - "
+                  f"marking these stories as posted so they aren't retried/duplicated")
+            for r in results:
+                mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=media_id)
+                r["media_id"] = media_id
+            print(f"\nDone: post {media_id} confirmed live ({len(results)} stories, "
+                  f"{len(public_urls)} images).")
+            return {"results": results, "media_id": media_id, "caption": caption}
+        print(f"  -> confirmed: it genuinely did not post - leaving these stories "
+              f"unmarked so they can be retried")
         return {"results": results, "media_id": None, "caption": caption}
 
     for r in results:
