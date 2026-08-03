@@ -1,0 +1,10 @@
+requests
+beautifulsoup4
+Pillow
+feedparser
+lxml
+supabase
+python-dotenv
+googlenewsdecoder
+selectolax
+pysocks
