@@ -326,6 +326,7 @@ def _ensure_today_schedule_remote(state: dict) -> dict:
             "planned_times": [t.isoformat() for t in planned],
             "posted": [False] * len(planned),
             "notified": [False] * len(planned),
+            "failed": [False] * len(planned),
             "schedule_announced": False,  # flips True once send_notifications.py has pushed the "schedule's ready" alert
         }
         _save_state_remote(state)
@@ -340,6 +341,9 @@ def _ensure_today_schedule_remote(state: dict) -> dict:
             changed = True
         if "schedule_announced" not in state:
             state["schedule_announced"] = False
+            changed = True
+        if "failed" not in state:
+            state["failed"] = [False] * len(state["planned_times"])
             changed = True
         if changed:
             _save_state_remote(state)
@@ -364,15 +368,18 @@ def _get_prebuilt_slot(due_index: int):
     return None
 
 
-def _publish_prebuilt_slot(slot: dict):
+def _publish_prebuilt_slot(slot: dict) -> bool:
     """Publishes a slot's already-built content (images already uploaded,
     stories already reserved in Supabase by content_pregen.py) instead of
     building anything fresh. Reuses the same 'verify against the real IG
-    feed if the API call errors' safety net as hourly_run.run_combined."""
+    feed if the API call errors' safety net as hourly_run.run_combined.
+
+    Returns True if the post is confirmed live (API call succeeded, or a
+    feed check confirmed it went live despite an API error), False if it
+    genuinely did not post."""
     from instagram_publish import (
         post_carousel_to_instagram, post_to_instagram, find_recent_matching_post,
     )
-
     image_urls = slot["image_urls"]
     caption = slot["caption"]
     print(f"  -> publishing pre-built content ({len(slot.get('stories', []))} stories, "
@@ -383,6 +390,7 @@ def _publish_prebuilt_slot(slot: dict):
         else:
             media_id = post_to_instagram(image_urls[0], caption)
         print(f"  -> posted. Media ID: {media_id}")
+        return True
     except Exception as e:
         print(f"  -> Instagram publish failed: {e}")
         print("  -> checking the account's recent media in case it actually posted "
@@ -390,10 +398,25 @@ def _publish_prebuilt_slot(slot: dict):
         media_id = find_recent_matching_post(caption)
         if media_id:
             print(f"  -> confirmed: post {media_id} actually went live despite the error.")
-        else:
-            print("  -> confirmed: it genuinely did not post. The stories in this slot "
-                  "were already reserved at pre-generation time, so they won't be "
-                  "retried automatically - check the app/logs and post manually if needed.")
+            return True
+        print("  -> confirmed: it genuinely did not post. The stories in this slot "
+              "were already reserved at pre-generation time, so they won't be "
+              "retried automatically - check the app/logs and post manually if needed.")
+        return False
+
+
+def _push_slot_status_remote(index: int, success: bool):
+    """Writes the real posted/failed outcome onto the app-visible
+    daily_slots state so the companion PWA shows a genuine failure
+    instead of a clock-based 'done' guess."""
+    slots_state = get_state(SLOTS_KEY, default={})
+    if slots_state.get("date") != today_ist().isoformat():
+        return
+    for slot in slots_state.get("slots", []):
+        if slot.get("index") == index:
+            slot["posted"] = success
+            slot["failed"] = not success
+    save_state(SLOTS_KEY, slots_state)
 
 
 def _check_manual_slot(state: dict, index: int):
@@ -481,27 +504,33 @@ def check_once():
     print(f"[{now.isoformat()}] Firing scheduled post "
           f"#{due_index + 1}/{len(state['planned_times'])} "
           f"(planned {planned_dt.strftime('%H:%M')} IST)")
+    success = False
     try:
         prebuilt = _get_prebuilt_slot(due_index)
         if prebuilt:
-            _publish_prebuilt_slot(prebuilt)
+            success = _publish_prebuilt_slot(prebuilt)
         else:
             print("  -> no pre-built content found for this slot - building fresh now.")
-            # Timing/randomness is already handled by the schedule itself,
-            # so skip hourly_run's own extra jitter delay.
             hourly_run.run_combined(
                 story_count=STORIES_PER_POST,
                 images_per_story=IMAGES_PER_STORY,
                 apply_jitter=False,
             )
+            success = True
     except Exception:
         print("Post attempt failed - will not retry this slot, "
               "continuing with the rest of today's schedule.")
         traceback.print_exc()
+        success = False
 
     state["posted"][due_index] = True
-    state["last_post_time"] = now_ist().isoformat()
+    if "failed" not in state:
+        state["failed"] = [False] * len(state["planned_times"])
+    state["failed"][due_index] = not success
+    if success:
+        state["last_post_time"] = now_ist().isoformat()
     _save_state_remote(state)
+    _push_slot_status_remote(due_index, success)
 
 
 def run_forever():
