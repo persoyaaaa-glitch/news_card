@@ -326,6 +326,24 @@ function renderScheduleModal() {
   });
 }
 
+async function triggerScheduleCheck() {
+  // Best-effort - if this fails, the schedule_overrides row is still
+  // saved and the next */30 cron tick will pick it up regardless.
+  try {
+    const resp = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/trigger-schedule-check`, {
+      method: "POST",
+      headers: {
+        apikey: CONFIG.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+      },
+    });
+    return resp.ok;
+  } catch (e) {
+    console.error(e);
+    return false;
+  }
+}
+
 async function saveScheduleChanges() {
   const saveBtn = document.getElementById("saveScheduleBtn");
   const status = document.getElementById("scheduleSaveStatus");
@@ -341,7 +359,11 @@ async function saveScheduleChanges() {
 
   const ok = await saveScheduleOverride(currentDateStr, isNaN(targetCount) ? null : targetCount, timeEdits);
   if (ok) {
-    status.textContent = "Saved. The app will pick this up on the next scheduler check (~30 min).";
+    status.textContent = "Saved. Triggering an immediate check...";
+    const triggered = await triggerScheduleCheck();
+    status.textContent = triggered
+      ? "Saved and a check is running now - refresh in a minute or two."
+      : "Saved, but couldn't trigger an immediate check - it'll still apply on the next scheduled check (~30 min).";
     saveBtn.textContent = "Save changes";
     saveBtn.disabled = false;
   } else {

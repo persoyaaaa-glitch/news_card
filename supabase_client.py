@@ -144,5 +144,31 @@ def save_state(key: str, value):
     }).execute()
 
 
+def get_manual_slot_indices(slot_date: str) -> set:
+    """Slot indices the PWA has flagged as 'I'm posting this one myself'
+    for the given date (see slot_overrides table / supabase_app_additions.sql)."""
+    client = get_client()
+    resp = client.table("slot_overrides").select("slot_index").eq("slot_date", slot_date).execute()
+    return {row["slot_index"] for row in resp.data}
+
+
+def get_schedule_override(slot_date: str):
+    """
+    Reads the PWA's requested schedule change for `slot_date` (see
+    schedule_overrides table / supabase_app_additions.sql) - target post
+    count for the day and/or specific times for individual not-yet-posted
+    slots. Returns None if nothing's been requested, or if the table
+    doesn't exist yet (e.g. supabase_app_additions.sql hasn't been re-run
+    since this feature was added) - daily_scheduler.py treats that exactly
+    like "no override," so this is safe to call before the SQL migration.
+    """
+    try:
+        client = get_client()
+        resp = client.table("schedule_overrides").select("*").eq("slot_date", slot_date).limit(1).execute()
+        return resp.data[0] if resp.data else None
+    except Exception:
+        return None
+
+
 if __name__ == "__main__":
     print("Set SUPABASE_URL and SUPABASE_SERVICE_KEY, then import functions from this module.")
