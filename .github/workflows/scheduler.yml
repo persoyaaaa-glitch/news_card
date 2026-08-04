@@ -59,7 +59,7 @@ jobs:
         run: python send_notifications.py
 
   pregenerate:
-    if: github.event.schedule == '30 18 * * *'
+    if: github.event.schedule == '30 18 * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     # Building every slot for the day is real work (each slot takes
     # roughly as long as an actual post did in your test run, ~1-3 min)
