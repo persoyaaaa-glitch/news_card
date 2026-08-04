@@ -102,7 +102,7 @@ async function saveScheduleOverride(dateStr, targetCount, timeEdits) {
 async function saveSubscription(sub) {
   const json = sub.toJSON();
   const url = `${CONFIG.SUPABASE_URL}/rest/v1/push_subscriptions`;
-  await fetch(url, {
+  const resp = await fetch(url, {
     method: "POST",
     headers: {
       apikey: CONFIG.SUPABASE_ANON_KEY,
@@ -116,6 +116,9 @@ async function saveSubscription(sub) {
       auth: json.keys.auth,
     }),
   });
+  if (!resp.ok) {
+    console.error(`[push] failed to save subscription (${resp.status}): ${await resp.text()}`);
+  }
 }
 
 // ---- Rendering ----
@@ -424,18 +427,32 @@ function urlBase64ToUint8Array(base64String) {
 }
 
 async function setupPush() {
-  if (!("serviceWorker" in navigator) || !("PushManager" in window)) return;
+  if (!("serviceWorker" in navigator) || !("PushManager" in window)) {
+    console.warn("[push] serviceWorker or PushManager not supported in this browser");
+    return;
+  }
 
   const reg = await navigator.serviceWorker.register("sw.js");
   const existing = await reg.pushManager.getSubscription();
 
-  if (existing) return; // already subscribed on this device
+  if (existing) {
+    // Already subscribed on this device - but the Supabase row may have
+    // been deleted/reset since (table wipe, reseed, etc). Re-save it every
+    // load so a locally-cached subscription always has a matching server
+    // row. Cheap no-op if the row is already there (unique endpoint +
+    // merge-duplicates upsert).
+    await saveSubscription(existing);
+    return;
+  }
 
   if (Notification.permission === "granted") {
     await subscribeAndSave(reg);
     return;
   }
-  if (Notification.permission === "denied") return;
+  if (Notification.permission === "denied") {
+    console.warn("[push] Notification permission is denied - reset site permissions to retry");
+    return;
+  }
 
   // Not yet decided - show the banner and let the person tap to opt in.
   const banner = document.getElementById("notifyBanner");
@@ -445,16 +462,22 @@ async function setupPush() {
     if (perm === "granted") {
       await subscribeAndSave(reg);
       banner.hidden = true;
+    } else {
+      console.warn(`[push] permission not granted: ${perm}`);
     }
   };
 }
 
 async function subscribeAndSave(reg) {
-  const sub = await reg.pushManager.subscribe({
-    userVisibleOnly: true,
-    applicationServerKey: urlBase64ToUint8Array(CONFIG.VAPID_PUBLIC_KEY),
-  });
-  await saveSubscription(sub);
+  try {
+    const sub = await reg.pushManager.subscribe({
+      userVisibleOnly: true,
+      applicationServerKey: urlBase64ToUint8Array(CONFIG.VAPID_PUBLIC_KEY),
+    });
+    await saveSubscription(sub);
+  } catch (e) {
+    console.error("[push] subscribeAndSave failed:", e);
+  }
 }
 
 // ---- Boot ----
@@ -512,4 +535,4 @@ tickClock();
 setInterval(tickClock, 1000 * 30);
 refresh();
 setInterval(refresh, 1000 * 60 * 5);
-setupPush();
+setupPush().catch((e) => console.error("[push] setupPush failed:", e));
