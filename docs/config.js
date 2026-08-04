@@ -9,7 +9,7 @@
 //    secret - never put it here).
 
 const CONFIG = {
-  SUPABASE_URL: "https://saxbibqukwvooyqnsfeq.supabase.co/",
+  SUPABASE_URL: "https://saxbibqukwvooyqnsfeq.supabase.co",
   SUPABASE_ANON_KEY: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InNheGJpYnF1a3d2b295cW5zZmVxIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODU1OTM2NTUsImV4cCI6MjEwMTE2OTY1NX0.dleFGdlcwnprqIOxewSMJDXvPOYWeN0VytRfrXL7hyU",
   VAPID_PUBLIC_KEY: "BBe0ooMu2Qe13ybWgKPhEIOb5EzUhds5bwGIUowW1498a3lbIRICPn_iOHxWfqBvCMZvRZG6gzUTIYDyRtktW0w",
 };
