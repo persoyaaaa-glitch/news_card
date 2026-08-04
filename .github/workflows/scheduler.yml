@@ -6,37 +6,45 @@ on:
     # minute even if it finishes in a few seconds, so the check-in
     # frequency itself - not just how often a post actually fires - is
     # the main driver of monthly Actions minutes on a private repo's
-    # free 2,000 min/month budget. 30 min here, paired with 3-5
-    # posts/day (see MIN/MAX_POSTS_PER_DAY in daily_scheduler.py),
-    # comfortably fits with margin to spare.
+    # free 2,000 min/month budget.
+    #
+    # Each tick does four things in order:
+    #   1. Ensure today's schedule exists (created once, right after
+    #      the first tick past midnight IST - see
+    #      _ensure_today_schedule_remote in daily_scheduler.py). This is
+    #      also what pushes the bare timestamps to the companion PWA.
+    #   2. Build content for any slot within ~30 min of its post time
+    #      that isn't built yet (content_pregen.py).
+    #   3. Post the earliest due, non-Manual-flagged slot, if any
+    #      (daily_scheduler.py --check-once). Manual-flagged slots are
+    #      checked against the real IG feed instead of auto-posted.
+    #   4. Send push notifications: the once-a-day "schedule's ready"
+    #      alert, and each slot's 15-minutes-before alert.
     - cron: "*/30 * * * *"
-
-    # Once a day, at 18:30 UTC = 00:00 IST, build every one of today's
-    # carousels up front (see content_pregen.py) so the companion PWA
-    # can show the whole day's slides/captions as soon as the day
-    # starts, and so 15-minute-before notifications have real content
-    # behind them. This job does real work for every slot in one run,
-    # so it costs noticeably more Actions minutes than a single
-    # check-and-post tick - see the note on Actions minutes budget in
-    # the setup notes.
-    - cron: "30 18 * * *"
-  workflow_dispatch: {}  # lets you trigger either job manually from the Actions tab
+  workflow_dispatch: {}  # lets you trigger a check manually from the Actions tab
 
 jobs:
   check-and-post:
-    if: github.event.schedule == '*/30 * * * *' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"  # skips re-downloading the same wheels every 20 min - meaningfully cuts per-run minutes
+          cache: "pip"  # skips re-downloading the same wheels every run - meaningfully cuts per-run minutes
 
       - name: Install dependencies
         run: pip install -r requirements.txt
+
+      - name: Build content for any slot coming up soon
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python content_pregen.py
 
       - name: Check schedule and post if due
         env:
@@ -50,39 +58,10 @@ jobs:
           META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
         run: python daily_scheduler.py --check-once
 
-      - name: Send 15-minutes-before push notifications
+      - name: Send push notifications (schedule-ready + 15-min-before)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
         run: python send_notifications.py
-
-  pregenerate:
-    if: github.event.schedule == '30 18 * * *' || github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    # Building every slot for the day is real work (each slot takes
-    # roughly as long as an actual post did in your test run, ~1-3 min)
-    # - with up to 23 slots/day this can run close to an hour. Raise
-    # further if you ever see this job hit the timeout with slots left
-    # unbuilt (any slot not built here just gets built fresh at its own
-    # post time instead, so a timeout here is never a hard failure).
-    timeout-minutes: 90
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-          cache: "pip"
-
-      - name: Install dependencies
-        run: pip install -r requirements.txt
-
-      - name: Pre-generate today's carousels
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: python content_pregen.py
