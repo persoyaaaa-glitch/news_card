@@ -71,6 +71,34 @@ async function markSlotManual(dateStr, slotIndex) {
   return resp.ok;
 }
 
+async function fetchScheduleOverride(dateStr) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/schedule_overrides?slot_date=eq.${dateStr}&select=*`;
+  const resp = await fetch(url, {
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+    },
+  });
+  if (!resp.ok) return null; // e.g. schedule_overrides doesn't exist yet - treat as "no override"
+  const rows = await resp.json();
+  return rows.length ? rows[0] : null;
+}
+
+async function saveScheduleOverride(dateStr, targetCount, timeEdits) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/schedule_overrides`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ slot_date: dateStr, target_count: targetCount, time_edits: timeEdits }),
+  });
+  return resp.ok;
+}
+
 async function saveSubscription(sub) {
   const json = sub.toJSON();
   const url = `${CONFIG.SUPABASE_URL}/rest/v1/push_subscriptions`;
@@ -237,6 +265,92 @@ function closeModal() {
   document.getElementById("modal").hidden = true;
 }
 
+// ---- Schedule editor modal ----
+
+let pendingOverride = null;
+
+async function openScheduleModal() {
+  if (!currentDateStr) return;
+  const modal = document.getElementById("scheduleModal");
+  const saveBtn = document.getElementById("saveScheduleBtn");
+  const status = document.getElementById("scheduleSaveStatus");
+  status.textContent = "";
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Loading...";
+  modal.hidden = false;
+
+  pendingOverride = (await fetchScheduleOverride(currentDateStr)) || { target_count: null, time_edits: {} };
+  renderScheduleModal();
+  saveBtn.disabled = false;
+  saveBtn.textContent = "Save changes";
+}
+
+function closeScheduleModal() {
+  document.getElementById("scheduleModal").hidden = true;
+}
+
+function renderScheduleModal() {
+  const now = nowIST();
+  const postedSlots = currentSlots.filter((s) => new Date(s.planned_time) <= now);
+  const pendingSlots = currentSlots.filter((s) => new Date(s.planned_time) > now);
+
+  document.getElementById("scheduleModalSub").textContent =
+    `${postedSlots.length} posted \u00b7 ${pendingSlots.length} remaining`;
+
+  const countInput = document.getElementById("postsCountInput");
+  countInput.min = Math.max(1, postedSlots.length);
+  const currentTotal = pendingOverride.target_count || currentSlots.length;
+  countInput.value = currentTotal;
+  document.getElementById("postsCountHint").textContent =
+    `Already-posted slots (${postedSlots.length}) can't be removed, so the lowest you can go is ${countInput.min}.`;
+
+  const list = document.getElementById("pendingTimesList");
+  list.innerHTML = "";
+  if (!pendingSlots.length) {
+    const p = document.createElement("p");
+    p.className = "field-hint";
+    p.textContent = "Nothing left to schedule today.";
+    list.appendChild(p);
+    return;
+  }
+  pendingSlots.forEach((slot) => {
+    const planned = new Date(slot.planned_time);
+    const row = document.createElement("div");
+    row.className = "pending-time-row";
+    row.innerHTML = `
+      <span class="slot-num">${String(slot.index + 1).padStart(2, "0")}</span>
+      <span>${(slot.stories && slot.stories[0]) ? escapeHtml(slot.stories[0].title).slice(0, 40) : "Pending"}</span>
+      <input type="time" data-index="${slot.index}" value="${fmtTime(planned)}">
+    `;
+    list.appendChild(row);
+  });
+}
+
+async function saveScheduleChanges() {
+  const saveBtn = document.getElementById("saveScheduleBtn");
+  const status = document.getElementById("scheduleSaveStatus");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Saving...";
+  status.textContent = "";
+
+  const targetCount = parseInt(document.getElementById("postsCountInput").value, 10);
+  const timeEdits = { ...(pendingOverride.time_edits || {}) };
+  document.querySelectorAll("#pendingTimesList input[type='time']").forEach((input) => {
+    if (input.value) timeEdits[input.dataset.index] = input.value;
+  });
+
+  const ok = await saveScheduleOverride(currentDateStr, isNaN(targetCount) ? null : targetCount, timeEdits);
+  if (ok) {
+    status.textContent = "Saved. The app will pick this up on the next scheduler check (~30 min).";
+    saveBtn.textContent = "Save changes";
+    saveBtn.disabled = false;
+  } else {
+    status.textContent = "Couldn't save that - check your connection and try again.";
+    saveBtn.textContent = "Save changes";
+    saveBtn.disabled = false;
+  }
+}
+
 async function downloadAllSlides(slot) {
   const btn = document.getElementById("downloadAllBtn");
   const status = document.getElementById("downloadStatus");
@@ -353,6 +467,20 @@ function renderTraffic(traffic) {
 document.getElementById("closeModalBtn").addEventListener("click", closeModal);
 document.getElementById("modal").addEventListener("click", (e) => {
   if (e.target.id === "modal") closeModal();
+});
+document.getElementById("openScheduleBtn").addEventListener("click", openScheduleModal);
+document.getElementById("closeScheduleModalBtn").addEventListener("click", closeScheduleModal);
+document.getElementById("scheduleModal").addEventListener("click", (e) => {
+  if (e.target.id === "scheduleModal") closeScheduleModal();
+});
+document.getElementById("saveScheduleBtn").addEventListener("click", saveScheduleChanges);
+document.getElementById("postsCountMinus").addEventListener("click", () => {
+  const input = document.getElementById("postsCountInput");
+  input.value = Math.max(parseInt(input.min, 10) || 1, (parseInt(input.value, 10) || 1) - 1);
+});
+document.getElementById("postsCountPlus").addEventListener("click", () => {
+  const input = document.getElementById("postsCountInput");
+  input.value = Math.min(15, (parseInt(input.value, 10) || 1) + 1);
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") refresh();
