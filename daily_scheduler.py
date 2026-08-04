@@ -38,7 +38,7 @@ import traceback
 from datetime import datetime, timedelta, date, timezone
 
 import hourly_run
-from supabase_client import get_state, save_state
+from supabase_client import get_state, save_state, get_manual_slot_indices
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_state.json")
 STATE_KEY = "scheduler_state"  # Supabase app_state key, used by check_once()
@@ -177,6 +177,23 @@ def _save_state_remote(state: dict):
     save_state(STATE_KEY, state)
 
 
+def _publish_schedule_skeleton(today_str: str, planned: list):
+    """
+    Pushes JUST the time slots (no content yet) to app_state[SLOTS_KEY] the
+    moment today's schedule is decided, so the companion PWA can show the
+    whole day's timestamps immediately at midnight. Each slot's actual
+    carousel (image_urls/caption/stories) gets filled in later, ~30 min
+    before that slot's own post time - see _build_due_content_remote().
+    """
+    save_state(SLOTS_KEY, {
+        "date": today_str,
+        "slots": [
+            {"index": i, "planned_time": t.isoformat(), "image_urls": [], "caption": "", "stories": []}
+            for i, t in enumerate(planned)
+        ],
+    })
+
+
 def _ensure_today_schedule_remote(state: dict) -> dict:
     today_str = today_ist().isoformat()
     if state.get("date") != today_str:
@@ -186,14 +203,23 @@ def _ensure_today_schedule_remote(state: dict) -> dict:
             "planned_times": [t.isoformat() for t in planned],
             "posted": [False] * len(planned),
             "notified": [False] * len(planned),
+            "schedule_announced": False,  # flips True once send_notifications.py has pushed the "schedule's ready" alert
         }
         _save_state_remote(state)
+        _publish_schedule_skeleton(today_str, planned)
         print(f"[{now_ist().isoformat()}] New schedule for {today_str} (IST): "
               f"{len(planned)} posts planned at "
               f"{', '.join(t.strftime('%H:%M') for t in planned)}")
-    elif "notified" not in state:
-        state["notified"] = [False] * len(state["planned_times"])
-        _save_state_remote(state)
+    else:
+        changed = False
+        if "notified" not in state:
+            state["notified"] = [False] * len(state["planned_times"])
+            changed = True
+        if "schedule_announced" not in state:
+            state["schedule_announced"] = False
+            changed = True
+        if changed:
+            _save_state_remote(state)
     return state
 
 
@@ -247,6 +273,29 @@ def _publish_prebuilt_slot(slot: dict):
                   "retried automatically - check the app/logs and post manually if needed.")
 
 
+def _check_manual_slot(state: dict, index: int):
+    """A slot you've flagged Manual is overdue - see if it already went
+    live on Instagram (you posted it yourself) and, if so, mark it
+    posted so the scheduler and the app both stop treating it as
+    pending. If nothing matching is found yet, leaves it alone; it'll
+    be checked again on the next tick."""
+    from instagram_publish import find_recent_matching_post
+
+    slot = _get_prebuilt_slot(index)
+    if not slot or not slot.get("caption"):
+        return  # content for this slot hasn't been built yet - nothing to match against
+    media_id = find_recent_matching_post(slot["caption"])
+    if media_id:
+        print(f"  -> slot #{index + 1} is flagged Manual and a matching post "
+              f"({media_id}) was found on the feed - marking it posted.")
+        state["posted"][index] = True
+        state["last_post_time"] = now_ist().isoformat()
+        _save_state_remote(state)
+    else:
+        print(f"  -> slot #{index + 1} is flagged Manual and still overdue - "
+              f"no matching post on the feed yet, leaving it pending.")
+
+
 def check_once():
     """
     One-shot version of run_forever()'s loop body, meant to be invoked by
@@ -263,24 +312,36 @@ def check_once():
     if nothing is currently due.
 
     If content_pregen.py already built this slot's carousel earlier
-    today (the companion app's "all content ready at midnight" feature),
+    (the companion app's rolling "content ready ~30 min ahead" feature),
     that pre-built content is published as-is. Otherwise this builds a
     fresh carousel on the spot, exactly as before that feature existed.
+
+    Slots you've flagged Manual in the PWA (see slot_overrides table)
+    are never auto-posted here. Instead, for each overdue manual slot,
+    this checks whether a matching post already appeared on the real
+    Instagram feed (i.e. you posted it yourself) and marks it done if
+    so - so the app's progress reflects reality and nothing gets
+    double-posted later by mistake.
     """
     state = _load_state_remote()
     state = _ensure_today_schedule_remote(state)
     now = now_ist()
+    manual_indices = get_manual_slot_indices(state["date"])
 
     due_index = None
     for i, iso_time in enumerate(state["planned_times"]):
         if state["posted"][i]:
             continue
-        if now >= datetime.fromisoformat(iso_time):
-            due_index = i
-            break
+        if now < datetime.fromisoformat(iso_time):
+            continue
+        if i in manual_indices:
+            _check_manual_slot(state, i)
+            continue  # never auto-post a manual slot - just check if you posted it yourself
+        due_index = i
+        break
 
     if due_index is None:
-        print(f"[{now.isoformat()}] Nothing due right now. "
+        print(f"[{now.isoformat()}] Nothing due for auto-posting right now. "
               f"{sum(state['posted'])}/{len(state['posted'])} posted today.")
         return
 
