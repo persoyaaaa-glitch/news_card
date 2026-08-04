@@ -88,6 +88,7 @@ body{
   position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-end;
   z-index:50;
 }
+.modal[hidden]{display:none;}
 .modal-sheet{
   width:100%;max-height:92vh;overflow-y:auto;background:var(--bg);
   border-radius:20px 20px 0 0;border:1px solid var(--line);border-bottom:none;
