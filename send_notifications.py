@@ -96,6 +96,19 @@ def check_and_notify():
         state["notified"] = [False] * len(state["planned_times"])
         changed = True
 
+    if not state.get("schedule_announced"):
+        n = len(state["planned_times"])
+        first = datetime.fromisoformat(state["planned_times"][0]).strftime("%H:%M")
+        last = datetime.fromisoformat(state["planned_times"][-1]).strftime("%H:%M")
+        print(f"[send_notifications] announcing today's schedule ({n} post(s), {first}-{last} IST)")
+        _send_to_all(
+            title=f"Today's schedule is ready - {n} post(s)",
+            body=f"First at {first} IST, last at {last} IST. Open the app to see all times.",
+            tag=f"{state['date']}-schedule",
+        )
+        state["schedule_announced"] = True
+        changed = True
+
     for i, iso_time in enumerate(state["planned_times"]):
         if state["posted"][i] or state["notified"][i]:
             continue
