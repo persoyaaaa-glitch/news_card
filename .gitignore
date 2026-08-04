@@ -31,3 +31,6 @@ tmp_images/*.png
 .DS_Store
 .vscode/
 .idea/
+
+# Supabase CLI local cache - machine-specific, can contain a connection string.
+supabase/.temp/
