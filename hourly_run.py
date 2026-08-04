@@ -612,7 +612,8 @@ def build_combined_caption(results: list) -> str:
 
 
 def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: int = 80,
-                  apply_jitter: bool = True, dry_run: bool = False, include_global: bool = True) -> dict:
+                  apply_jitter: bool = True, dry_run: bool = False, include_global: bool = True,
+                  publish: bool = True) -> dict:
     """
     Posts `story_count` distinct stories bundled into ONE Instagram
     carousel post (default: 5 stories x 2 images each = 10 images,
@@ -641,6 +642,15 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
     Returns a dict: {"results": [...per-story dicts...], "media_id":
     str or None, "caption": str}. In dry_run, media_id is None and
     nothing is uploaded/posted/marked.
+
+    publish: when False (and dry_run is False), images ARE uploaded to
+    Supabase Storage and every story IS marked as posted (so it's never
+    picked again), but the actual Instagram publish call is skipped and
+    media_id comes back None. This is what content_pregen.py uses to
+    pre-build a slot's content ahead of time for the companion app to
+    preview/download, while still reserving those stories so a later
+    slot doesn't pick the same ones. The real publish happens later,
+    separately, when daily_scheduler.py fires that slot.
     """
     ensure_token_fresh()
     if apply_jitter:
@@ -720,6 +730,16 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
     print(f"  -> uploading {len(all_slide_paths)} image(s) to Supabase Storage...")
     public_urls = upload_carousel_images(all_slide_paths)
 
+    if not publish:
+        print(f"  -> publish=False (pre-generation mode): reserving these {len(results)} "
+              f"stories now so no later slot today can pick them again, but NOT posting "
+              f"to Instagram yet")
+        for r in results:
+            mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=None)
+            r["media_id"] = None
+            r["image_urls"] = public_urls
+        return {"results": results, "media_id": None, "caption": caption, "image_urls": public_urls}
+
     print(f"  -> posting ONE combined carousel ({len(results)} stories, {len(public_urls)} images) to Instagram...")
     try:
         if len(public_urls) >= 2:
@@ -748,10 +768,11 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
     for r in results:
         mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=media_id)
         r["media_id"] = media_id
+        r["image_urls"] = public_urls
 
     print(f"\nDone: posted 1 carousel with {len(results)} stories / {len(public_urls)} images "
           f"in priority order. Media ID: {media_id}")
-    return {"results": results, "media_id": media_id, "caption": caption}
+    return {"results": results, "media_id": media_id, "caption": caption, "image_urls": public_urls}
 
 
 if __name__ == "__main__":

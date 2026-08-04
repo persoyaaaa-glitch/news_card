@@ -1,0 +1,14 @@
+{
+  "name": "Rundown — Today's Posts",
+  "short_name": "Rundown",
+  "description": "Preview and download today's scheduled news carousel posts before they go out.",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0B0D10",
+  "theme_color": "#0B0D10",
+  "icons": [
+    { "src": "icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable" }
+  ]
+}

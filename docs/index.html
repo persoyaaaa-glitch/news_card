@@ -1,0 +1,81 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#0B0D10">
+<title>Rundown</title>
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="stylesheet" href="style.css">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet">
+</head>
+<body>
+
+<div id="app">
+
+  <header class="hdr">
+    <div class="hdr-top">
+      <span class="eyebrow">RUNDOWN</span>
+      <span class="clock" id="clock">--:--</span>
+    </div>
+    <div class="hdr-date" id="dateLabel">Loading today's schedule&hellip;</div>
+    <div class="progress-row">
+      <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
+      <span class="progress-label" id="progressLabel">0/0</span>
+    </div>
+    <div class="traffic-label" id="trafficLabel" hidden></div>
+  </header>
+
+  <div class="notify-banner" id="notifyBanner" hidden>
+    <span>Get a nudge 15 minutes before each post.</span>
+    <button id="enableNotifyBtn">Enable</button>
+  </div>
+
+  <main id="list" class="list">
+    <div class="empty-state" id="emptyState">
+      <div class="empty-icon">&#9679;</div>
+      <p>No slots loaded yet.</p>
+    </div>
+  </main>
+
+  <p class="footnote">Posting happens automatically on schedule &mdash; this app is just a preview.
+    Nothing here needs a tap.</p>
+
+</div>
+
+<!-- Slot detail modal -->
+<div id="modal" class="modal" hidden>
+  <div class="modal-sheet">
+    <div class="modal-head">
+      <div>
+        <div class="modal-time" id="modalTime">--:--</div>
+        <div class="modal-sub" id="modalSub">0 stories</div>
+      </div>
+      <button class="close-btn" id="closeModalBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="slides-scroller" id="slidesScroller"></div>
+
+    <button class="download-all-btn" id="downloadAllBtn">Download all slides</button>
+    <div class="download-status" id="downloadStatus"></div>
+
+    <div class="caption-block">
+      <div class="caption-head">
+        <span>Caption &amp; hashtags</span>
+        <button class="copy-btn" id="copyBtn">Copy</button>
+      </div>
+      <pre class="caption-text" id="captionText"></pre>
+    </div>
+
+    <ul class="story-list" id="storyList"></ul>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

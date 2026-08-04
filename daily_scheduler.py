@@ -35,16 +35,31 @@ import os
 import random
 import time
 import traceback
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 
 import hourly_run
 from supabase_client import get_state, save_state
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_state.json")
 STATE_KEY = "scheduler_state"  # Supabase app_state key, used by check_once()
+SLOTS_KEY = "daily_slots"  # Supabase app_state key holding pre-generated content, written by content_pregen.py
 
-MIN_POSTS_PER_DAY = 13
-MAX_POSTS_PER_DAY = 23
+# GitHub Actions runners (and most servers) run on UTC. Everything in
+# this file - "today", the PEAK_WINDOWS clock hours, "midnight" - is
+# meant to mean India Standard Time, not the server's own clock, so all
+# of it is anchored to this fixed offset rather than naive datetime.now().
+IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def now_ist() -> datetime:
+    return datetime.now(IST)
+
+
+def today_ist() -> date:
+    return now_ist().date()
+
+MIN_POSTS_PER_DAY = 3
+MAX_POSTS_PER_DAY = 5
 
 # Each "post" now bundles this many distinct stories into ONE combined
 # carousel (see hourly_run.run_combined) instead of one story per post -
@@ -80,8 +95,8 @@ PEAK_WINDOWS = [
 
 def _random_time_in_window(day: date, window) -> datetime:
     sh, sm, eh, em, _ = window
-    start = datetime(day.year, day.month, day.day, sh, sm)
-    end = datetime(day.year, day.month, day.day, eh, em)
+    start = datetime(day.year, day.month, day.day, sh, sm, tzinfo=IST)
+    end = datetime(day.year, day.month, day.day, eh, em, tzinfo=IST)
     delta_seconds = int((end - start).total_seconds())
     return start + timedelta(seconds=random.randint(0, max(delta_seconds, 0)))
 
@@ -90,10 +105,11 @@ def generate_daily_schedule(day: date = None, min_posts: int = MIN_POSTS_PER_DAY
                              max_posts: int = MAX_POSTS_PER_DAY,
                              min_gap_minutes: int = MIN_GAP_MINUTES) -> list:
     """
-    Returns a sorted list of datetime objects for `day`, weighted toward
-    PEAK_WINDOWS, with at least min_gap_minutes between consecutive posts.
+    Returns a sorted list of IST-aware datetime objects for `day`,
+    weighted toward PEAK_WINDOWS (which are IST clock hours), with at
+    least min_gap_minutes between consecutive posts.
     """
-    day = day or date.today()
+    day = day or today_ist()
     num_posts = random.randint(min_posts, max_posts)
 
     weights = [w[4] for w in PEAK_WINDOWS]
@@ -162,37 +178,98 @@ def _save_state_remote(state: dict):
 
 
 def _ensure_today_schedule_remote(state: dict) -> dict:
-    today_str = date.today().isoformat()
+    today_str = today_ist().isoformat()
     if state.get("date") != today_str:
-        planned = generate_daily_schedule(date.today())
+        planned = generate_daily_schedule(today_ist())
         state = {
             "date": today_str,
             "planned_times": [t.isoformat() for t in planned],
             "posted": [False] * len(planned),
+            "notified": [False] * len(planned),
         }
         _save_state_remote(state)
-        print(f"[{datetime.now().isoformat()}] New schedule for {today_str}: "
+        print(f"[{now_ist().isoformat()}] New schedule for {today_str} (IST): "
               f"{len(planned)} posts planned at "
               f"{', '.join(t.strftime('%H:%M') for t in planned)}")
+    elif "notified" not in state:
+        state["notified"] = [False] * len(state["planned_times"])
+        _save_state_remote(state)
     return state
+
+
+def _get_prebuilt_slot(due_index: int):
+    """
+    Looks up content_pregen.py's output for today's slot `due_index`, if
+    it exists. Returns the slot dict ({"image_urls": [...], "caption":
+    str, "stories": [...]}), or None if pregeneration hasn't produced
+    this slot yet (e.g. content_pregen.py didn't run today, or is still
+    mid-way through building slots) - in which case check_once() falls
+    back to building fresh, exactly like before this feature existed.
+    """
+    slots_state = get_state(SLOTS_KEY, default={})
+    if slots_state.get("date") != today_ist().isoformat():
+        return None
+    for slot in slots_state.get("slots", []):
+        if slot.get("index") == due_index and slot.get("image_urls"):
+            return slot
+    return None
+
+
+def _publish_prebuilt_slot(slot: dict):
+    """Publishes a slot's already-built content (images already uploaded,
+    stories already reserved in Supabase by content_pregen.py) instead of
+    building anything fresh. Reuses the same 'verify against the real IG
+    feed if the API call errors' safety net as hourly_run.run_combined."""
+    from instagram_publish import (
+        post_carousel_to_instagram, post_to_instagram, find_recent_matching_post,
+    )
+
+    image_urls = slot["image_urls"]
+    caption = slot["caption"]
+    print(f"  -> publishing pre-built content ({len(slot.get('stories', []))} stories, "
+          f"{len(image_urls)} images)...")
+    try:
+        if len(image_urls) >= 2:
+            media_id = post_carousel_to_instagram(image_urls, caption)
+        else:
+            media_id = post_to_instagram(image_urls[0], caption)
+        print(f"  -> posted. Media ID: {media_id}")
+    except Exception as e:
+        print(f"  -> Instagram publish failed: {e}")
+        print("  -> checking the account's recent media in case it actually posted "
+              "despite the error...")
+        media_id = find_recent_matching_post(caption)
+        if media_id:
+            print(f"  -> confirmed: post {media_id} actually went live despite the error.")
+        else:
+            print("  -> confirmed: it genuinely did not post. The stories in this slot "
+                  "were already reserved at pre-generation time, so they won't be "
+                  "retried automatically - check the app/logs and post manually if needed.")
 
 
 def check_once():
     """
     One-shot version of run_forever()'s loop body, meant to be invoked by
-    an external scheduler (GitHub Actions cron, e.g. every 10-15 minutes)
+    an external scheduler (GitHub Actions cron, e.g. every 20 minutes)
     instead of running as a resident process. State lives in Supabase
     (app_state, key "scheduler_state") rather than a local JSON file,
     since GitHub Actions runners don't persist a filesystem between runs.
+    All "today"/"now" here means IST, regardless of the server's own
+    clock.
 
     Fires AT MOST ONE post per invocation - the single earliest overdue,
     not-yet-posted slot that also clears MIN_GAP_MINUTES since the last
     post - then exits. Safe to call as often as you like; it's a no-op
     if nothing is currently due.
+
+    If content_pregen.py already built this slot's carousel earlier
+    today (the companion app's "all content ready at midnight" feature),
+    that pre-built content is published as-is. Otherwise this builds a
+    fresh carousel on the spot, exactly as before that feature existed.
     """
     state = _load_state_remote()
     state = _ensure_today_schedule_remote(state)
-    now = datetime.now()
+    now = now_ist()
 
     due_index = None
     for i, iso_time in enumerate(state["planned_times"]):
@@ -203,7 +280,7 @@ def check_once():
             break
 
     if due_index is None:
-        print(f"[{datetime.now().isoformat()}] Nothing due right now. "
+        print(f"[{now.isoformat()}] Nothing due right now. "
               f"{sum(state['posted'])}/{len(state['posted'])} posted today.")
         return
 
@@ -212,29 +289,34 @@ def check_once():
     gap_ok = last_post_dt is None or (now - last_post_dt).total_seconds() >= MIN_GAP_MINUTES * 60
 
     if not gap_ok:
-        print(f"[{datetime.now().isoformat()}] Slot #{due_index + 1} is overdue but the "
+        print(f"[{now.isoformat()}] Slot #{due_index + 1} is overdue but the "
               f"minimum gap since the last post hasn't elapsed yet - waiting for a later run.")
         return
 
     planned_dt = datetime.fromisoformat(state["planned_times"][due_index])
-    print(f"[{datetime.now().isoformat()}] Firing scheduled post "
+    print(f"[{now.isoformat()}] Firing scheduled post "
           f"#{due_index + 1}/{len(state['planned_times'])} "
-          f"(planned {planned_dt.strftime('%H:%M')})")
+          f"(planned {planned_dt.strftime('%H:%M')} IST)")
     try:
-        # Timing/randomness is already handled by the schedule itself,
-        # so skip hourly_run's own extra jitter delay.
-        hourly_run.run_combined(
-            story_count=STORIES_PER_POST,
-            images_per_story=IMAGES_PER_STORY,
-            apply_jitter=False,
-        )
+        prebuilt = _get_prebuilt_slot(due_index)
+        if prebuilt:
+            _publish_prebuilt_slot(prebuilt)
+        else:
+            print("  -> no pre-built content found for this slot - building fresh now.")
+            # Timing/randomness is already handled by the schedule itself,
+            # so skip hourly_run's own extra jitter delay.
+            hourly_run.run_combined(
+                story_count=STORIES_PER_POST,
+                images_per_story=IMAGES_PER_STORY,
+                apply_jitter=False,
+            )
     except Exception:
         print("Post attempt failed - will not retry this slot, "
               "continuing with the rest of today's schedule.")
         traceback.print_exc()
 
     state["posted"][due_index] = True
-    state["last_post_time"] = datetime.now().isoformat()
+    state["last_post_time"] = now_ist().isoformat()
     _save_state_remote(state)
 
 
