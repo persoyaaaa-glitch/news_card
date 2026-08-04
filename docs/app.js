@@ -43,6 +43,34 @@ async function fetchRepoTraffic() {
   return rows.length ? rows[0].value : null;
 }
 
+async function fetchManualIndices(dateStr) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/slot_overrides?slot_date=eq.${dateStr}&select=slot_index`;
+  const resp = await fetch(url, {
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+    },
+  });
+  if (!resp.ok) return new Set();
+  const rows = await resp.json();
+  return new Set(rows.map((r) => r.slot_index));
+}
+
+async function markSlotManual(dateStr, slotIndex) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/slot_overrides`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex, manual: true }),
+  });
+  return resp.ok;
+}
+
 async function saveSubscription(sub) {
   const json = sub.toJSON();
   const url = `${CONFIG.SUPABASE_URL}/rest/v1/push_subscriptions`;
@@ -65,6 +93,8 @@ async function saveSubscription(sub) {
 // ---- Rendering ----
 
 let currentSlots = [];
+let currentManualIndices = new Set();
+let currentDateStr = null;
 
 function statusOf(slot, allSorted, index) {
   const now = nowIST();
@@ -75,7 +105,9 @@ function statusOf(slot, allSorted, index) {
   return "pending";
 }
 
-function render(data) {
+function render(data, manualIndices) {
+  currentDateStr = data.date;
+  currentManualIndices = manualIndices || new Set();
   document.getElementById("dateLabel").textContent = data.date
     ? fmtDate(new Date(data.date))
     : "No schedule yet";
@@ -102,15 +134,16 @@ function render(data) {
   slots.forEach((slot, i) => {
     const planned = new Date(slot.planned_time);
     const status = statusOf(slot, slots, i);
+    const isManual = currentManualIndices.has(slot.index);
     const row = document.createElement("div");
-    row.className = `slot-row ${status}`;
+    row.className = `slot-row ${status}${isManual ? " manual" : ""}`;
     const topStory = (slot.stories && slot.stories[0]) || null;
 
     row.innerHTML = `
       <span class="slot-num">${String(i + 1).padStart(2, "0")}</span>
       <span class="slot-dot ${status === "past" ? "posted" : status}"></span>
       <div class="slot-main">
-        <div class="slot-time">${fmtTime(planned)}</div>
+        <div class="slot-time">${fmtTime(planned)}${isManual ? ' <span class="manual-tag">MANUAL</span>' : ""}</div>
         <div class="slot-headline">${topStory ? escapeHtml(topStory.title) : "Pending"}</div>
       </div>
       <span class="slot-meta">${(slot.stories || []).length}&middot;${(slot.image_urls || []).length}</span>
@@ -169,6 +202,33 @@ function openModal(slot) {
   document.getElementById("copyBtn").onclick = () => copyCaption(slot.caption || "");
   document.getElementById("copyBtn").classList.remove("copied");
   document.getElementById("copyBtn").textContent = "Copy";
+
+  const manualBtn = document.getElementById("manualBtn");
+  const manualStatus = document.getElementById("manualStatus");
+  const alreadyManual = currentManualIndices.has(slot.index);
+  manualBtn.disabled = alreadyManual;
+  manualBtn.textContent = alreadyManual
+    ? "Taken over \u2014 auto-post skipped for this one"
+    : "Take over \u2014 post this one manually";
+  manualStatus.textContent = alreadyManual
+    ? "Download the slides above and post it yourself; the app will pick it up once it's live."
+    : "";
+  manualBtn.onclick = async () => {
+    if (!currentDateStr) return;
+    manualBtn.disabled = true;
+    manualBtn.textContent = "Marking...";
+    const ok = await markSlotManual(currentDateStr, slot.index);
+    if (ok) {
+      currentManualIndices.add(slot.index);
+      manualBtn.textContent = "Taken over \u2014 auto-post skipped for this one";
+      manualStatus.textContent = "Download the slides above and post it yourself; the app will pick it up once it's live.";
+      render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+    } else {
+      manualBtn.disabled = false;
+      manualBtn.textContent = "Take over \u2014 post this one manually";
+      manualStatus.textContent = "Couldn't save that - check your connection and try again.";
+    }
+  };
 
   modal.hidden = false;
 }
@@ -266,7 +326,8 @@ async function subscribeAndSave(reg) {
 async function refresh() {
   try {
     const data = await fetchDailySlots();
-    render(data);
+    const manualIndices = data.date ? await fetchManualIndices(data.date) : new Set();
+    render(data, manualIndices);
   } catch (e) {
     console.error(e);
   }
