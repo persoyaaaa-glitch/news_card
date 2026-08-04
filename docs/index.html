@@ -20,7 +20,10 @@
   <header class="hdr">
     <div class="hdr-top">
       <span class="eyebrow">RUNDOWN</span>
-      <span class="clock" id="clock">--:--</span>
+      <div class="hdr-top-right">
+        <span class="clock" id="clock">--:--</span>
+        <button class="settings-btn" id="openScheduleBtn" aria-label="Edit today's schedule">&#9881;</button>
+      </div>
     </div>
     <div class="hdr-date" id="dateLabel">Loading today's schedule&hellip;</div>
     <div class="progress-row">
@@ -42,8 +45,8 @@
     </div>
   </main>
 
-  <p class="footnote">Posting happens automatically on schedule &mdash; this app is just a preview.
-    Nothing here needs a tap.</p>
+  <p class="footnote">Posting happens automatically on schedule. Tap a slot only if you want
+    to take it over and post it yourself.</p>
 
 </div>
 
@@ -63,6 +66,9 @@
     <button class="download-all-btn" id="downloadAllBtn">Download all slides</button>
     <div class="download-status" id="downloadStatus"></div>
 
+    <button class="manual-btn" id="manualBtn">Take over &mdash; post this one manually</button>
+    <div class="manual-status" id="manualStatus"></div>
+
     <div class="caption-block">
       <div class="caption-head">
         <span>Caption &amp; hashtags</span>
@@ -72,6 +78,40 @@
     </div>
 
     <ul class="story-list" id="storyList"></ul>
+  </div>
+</div>
+
+<!-- Schedule editor modal -->
+<div id="scheduleModal" class="modal" hidden>
+  <div class="modal-sheet">
+    <div class="modal-head">
+      <div>
+        <div class="modal-time">Today's schedule</div>
+        <div class="modal-sub" id="scheduleModalSub">0 posted &middot; 0 remaining</div>
+      </div>
+      <button class="close-btn" id="closeScheduleModalBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <div class="field-block">
+      <label class="field-label" for="postsCountInput">Posts today (total)</label>
+      <div class="count-row">
+        <button type="button" class="count-step" id="postsCountMinus" aria-label="Decrease">&minus;</button>
+        <input type="number" id="postsCountInput" min="1" max="15" inputmode="numeric">
+        <button type="button" class="count-step" id="postsCountPlus" aria-label="Increase">&plus;</button>
+      </div>
+      <p class="field-hint" id="postsCountHint"></p>
+    </div>
+
+    <div class="field-block">
+      <span class="field-label">Remaining slot times</span>
+      <div id="pendingTimesList" class="pending-times-list"></div>
+      <p class="field-hint" id="pendingTimesHint">Only slots that haven't posted yet can be moved.</p>
+    </div>
+
+    <button class="download-all-btn" id="saveScheduleBtn">Save changes</button>
+    <div class="download-status" id="scheduleSaveStatus"></div>
+    <p class="footnote" style="margin-top:14px;">Changes are picked up by the next scheduler check
+      (runs every ~30 min), not instantly.</p>
   </div>
 </div>
 

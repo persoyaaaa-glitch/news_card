@@ -43,6 +43,62 @@ async function fetchRepoTraffic() {
   return rows.length ? rows[0].value : null;
 }
 
+async function fetchManualIndices(dateStr) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/slot_overrides?slot_date=eq.${dateStr}&select=slot_index`;
+  const resp = await fetch(url, {
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+    },
+  });
+  if (!resp.ok) return new Set();
+  const rows = await resp.json();
+  return new Set(rows.map((r) => r.slot_index));
+}
+
+async function markSlotManual(dateStr, slotIndex) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/slot_overrides`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex, manual: true }),
+  });
+  return resp.ok;
+}
+
+async function fetchScheduleOverride(dateStr) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/schedule_overrides?slot_date=eq.${dateStr}&select=*`;
+  const resp = await fetch(url, {
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+    },
+  });
+  if (!resp.ok) return null; // e.g. schedule_overrides doesn't exist yet - treat as "no override"
+  const rows = await resp.json();
+  return rows.length ? rows[0] : null;
+}
+
+async function saveScheduleOverride(dateStr, targetCount, timeEdits) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/schedule_overrides`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+      "Content-Type": "application/json",
+      Prefer: "resolution=merge-duplicates",
+    },
+    body: JSON.stringify({ slot_date: dateStr, target_count: targetCount, time_edits: timeEdits }),
+  });
+  return resp.ok;
+}
+
 async function saveSubscription(sub) {
   const json = sub.toJSON();
   const url = `${CONFIG.SUPABASE_URL}/rest/v1/push_subscriptions`;
@@ -65,6 +121,8 @@ async function saveSubscription(sub) {
 // ---- Rendering ----
 
 let currentSlots = [];
+let currentManualIndices = new Set();
+let currentDateStr = null;
 
 function statusOf(slot, allSorted, index) {
   const now = nowIST();
@@ -75,7 +133,9 @@ function statusOf(slot, allSorted, index) {
   return "pending";
 }
 
-function render(data) {
+function render(data, manualIndices) {
+  currentDateStr = data.date;
+  currentManualIndices = manualIndices || new Set();
   document.getElementById("dateLabel").textContent = data.date
     ? fmtDate(new Date(data.date))
     : "No schedule yet";
@@ -102,15 +162,16 @@ function render(data) {
   slots.forEach((slot, i) => {
     const planned = new Date(slot.planned_time);
     const status = statusOf(slot, slots, i);
+    const isManual = currentManualIndices.has(slot.index);
     const row = document.createElement("div");
-    row.className = `slot-row ${status}`;
+    row.className = `slot-row ${status}${isManual ? " manual" : ""}`;
     const topStory = (slot.stories && slot.stories[0]) || null;
 
     row.innerHTML = `
       <span class="slot-num">${String(i + 1).padStart(2, "0")}</span>
       <span class="slot-dot ${status === "past" ? "posted" : status}"></span>
       <div class="slot-main">
-        <div class="slot-time">${fmtTime(planned)}</div>
+        <div class="slot-time">${fmtTime(planned)}${isManual ? ' <span class="manual-tag">MANUAL</span>' : ""}</div>
         <div class="slot-headline">${topStory ? escapeHtml(topStory.title) : "Pending"}</div>
       </div>
       <span class="slot-meta">${(slot.stories || []).length}&middot;${(slot.image_urls || []).length}</span>
@@ -170,11 +231,124 @@ function openModal(slot) {
   document.getElementById("copyBtn").classList.remove("copied");
   document.getElementById("copyBtn").textContent = "Copy";
 
+  const manualBtn = document.getElementById("manualBtn");
+  const manualStatus = document.getElementById("manualStatus");
+  const alreadyManual = currentManualIndices.has(slot.index);
+  manualBtn.disabled = alreadyManual;
+  manualBtn.textContent = alreadyManual
+    ? "Taken over \u2014 auto-post skipped for this one"
+    : "Take over \u2014 post this one manually";
+  manualStatus.textContent = alreadyManual
+    ? "Download the slides above and post it yourself; the app will pick it up once it's live."
+    : "";
+  manualBtn.onclick = async () => {
+    if (!currentDateStr) return;
+    manualBtn.disabled = true;
+    manualBtn.textContent = "Marking...";
+    const ok = await markSlotManual(currentDateStr, slot.index);
+    if (ok) {
+      currentManualIndices.add(slot.index);
+      manualBtn.textContent = "Taken over \u2014 auto-post skipped for this one";
+      manualStatus.textContent = "Download the slides above and post it yourself; the app will pick it up once it's live.";
+      render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+    } else {
+      manualBtn.disabled = false;
+      manualBtn.textContent = "Take over \u2014 post this one manually";
+      manualStatus.textContent = "Couldn't save that - check your connection and try again.";
+    }
+  };
+
   modal.hidden = false;
 }
 
 function closeModal() {
   document.getElementById("modal").hidden = true;
+}
+
+// ---- Schedule editor modal ----
+
+let pendingOverride = null;
+
+async function openScheduleModal() {
+  if (!currentDateStr) return;
+  const modal = document.getElementById("scheduleModal");
+  const saveBtn = document.getElementById("saveScheduleBtn");
+  const status = document.getElementById("scheduleSaveStatus");
+  status.textContent = "";
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Loading...";
+  modal.hidden = false;
+
+  pendingOverride = (await fetchScheduleOverride(currentDateStr)) || { target_count: null, time_edits: {} };
+  renderScheduleModal();
+  saveBtn.disabled = false;
+  saveBtn.textContent = "Save changes";
+}
+
+function closeScheduleModal() {
+  document.getElementById("scheduleModal").hidden = true;
+}
+
+function renderScheduleModal() {
+  const now = nowIST();
+  const postedSlots = currentSlots.filter((s) => new Date(s.planned_time) <= now);
+  const pendingSlots = currentSlots.filter((s) => new Date(s.planned_time) > now);
+
+  document.getElementById("scheduleModalSub").textContent =
+    `${postedSlots.length} posted \u00b7 ${pendingSlots.length} remaining`;
+
+  const countInput = document.getElementById("postsCountInput");
+  countInput.min = Math.max(1, postedSlots.length);
+  const currentTotal = pendingOverride.target_count || currentSlots.length;
+  countInput.value = currentTotal;
+  document.getElementById("postsCountHint").textContent =
+    `Already-posted slots (${postedSlots.length}) can't be removed, so the lowest you can go is ${countInput.min}.`;
+
+  const list = document.getElementById("pendingTimesList");
+  list.innerHTML = "";
+  if (!pendingSlots.length) {
+    const p = document.createElement("p");
+    p.className = "field-hint";
+    p.textContent = "Nothing left to schedule today.";
+    list.appendChild(p);
+    return;
+  }
+  pendingSlots.forEach((slot) => {
+    const planned = new Date(slot.planned_time);
+    const row = document.createElement("div");
+    row.className = "pending-time-row";
+    row.innerHTML = `
+      <span class="slot-num">${String(slot.index + 1).padStart(2, "0")}</span>
+      <span>${(slot.stories && slot.stories[0]) ? escapeHtml(slot.stories[0].title).slice(0, 40) : "Pending"}</span>
+      <input type="time" data-index="${slot.index}" value="${fmtTime(planned)}">
+    `;
+    list.appendChild(row);
+  });
+}
+
+async function saveScheduleChanges() {
+  const saveBtn = document.getElementById("saveScheduleBtn");
+  const status = document.getElementById("scheduleSaveStatus");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Saving...";
+  status.textContent = "";
+
+  const targetCount = parseInt(document.getElementById("postsCountInput").value, 10);
+  const timeEdits = { ...(pendingOverride.time_edits || {}) };
+  document.querySelectorAll("#pendingTimesList input[type='time']").forEach((input) => {
+    if (input.value) timeEdits[input.dataset.index] = input.value;
+  });
+
+  const ok = await saveScheduleOverride(currentDateStr, isNaN(targetCount) ? null : targetCount, timeEdits);
+  if (ok) {
+    status.textContent = "Saved. The app will pick this up on the next scheduler check (~30 min).";
+    saveBtn.textContent = "Save changes";
+    saveBtn.disabled = false;
+  } else {
+    status.textContent = "Couldn't save that - check your connection and try again.";
+    saveBtn.textContent = "Save changes";
+    saveBtn.disabled = false;
+  }
 }
 
 async function downloadAllSlides(slot) {
@@ -266,7 +440,8 @@ async function subscribeAndSave(reg) {
 async function refresh() {
   try {
     const data = await fetchDailySlots();
-    render(data);
+    const manualIndices = data.date ? await fetchManualIndices(data.date) : new Set();
+    render(data, manualIndices);
   } catch (e) {
     console.error(e);
   }
@@ -292,6 +467,20 @@ function renderTraffic(traffic) {
 document.getElementById("closeModalBtn").addEventListener("click", closeModal);
 document.getElementById("modal").addEventListener("click", (e) => {
   if (e.target.id === "modal") closeModal();
+});
+document.getElementById("openScheduleBtn").addEventListener("click", openScheduleModal);
+document.getElementById("closeScheduleModalBtn").addEventListener("click", closeScheduleModal);
+document.getElementById("scheduleModal").addEventListener("click", (e) => {
+  if (e.target.id === "scheduleModal") closeScheduleModal();
+});
+document.getElementById("saveScheduleBtn").addEventListener("click", saveScheduleChanges);
+document.getElementById("postsCountMinus").addEventListener("click", () => {
+  const input = document.getElementById("postsCountInput");
+  input.value = Math.max(parseInt(input.min, 10) || 1, (parseInt(input.value, 10) || 1) - 1);
+});
+document.getElementById("postsCountPlus").addEventListener("click", () => {
+  const input = document.getElementById("postsCountInput");
+  input.value = Math.min(15, (parseInt(input.value, 10) || 1) + 1);
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") refresh();
