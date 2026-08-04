@@ -12,9 +12,22 @@
 // exact same "Run workflow" button you already have in the Actions tab.
 // It does not touch anything else on the repo.
 
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "apikey, authorization, content-type",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
+
 Deno.serve(async (req) => {
+  // Browsers send this before the real POST because the request carries
+  // custom headers (apikey/Authorization). Without a 2xx reply here, the
+  // browser never even attempts the POST - that was the whole bug.
+  if (req.method === "OPTIONS") {
+    return new Response(null, { status: 204, headers: CORS_HEADERS });
+  }
+
   if (req.method !== "POST") {
-    return new Response("Method not allowed", { status: 405 });
+    return new Response("Method not allowed", { status: 405, headers: CORS_HEADERS });
   }
 
   const token = Deno.env.get("GITHUB_DISPATCH_TOKEN");
@@ -22,7 +35,10 @@ Deno.serve(async (req) => {
   const repo = Deno.env.get("GITHUB_REPO_NAME");
 
   if (!token || !owner || !repo) {
-    return new Response("Missing GITHUB_DISPATCH_TOKEN/GITHUB_REPO_OWNER/GITHUB_REPO_NAME secret(s)", { status: 500 });
+    return new Response(
+      "Missing GITHUB_DISPATCH_TOKEN/GITHUB_REPO_OWNER/GITHUB_REPO_NAME secret(s)",
+      { status: 500, headers: CORS_HEADERS }
+    );
   }
 
   const resp = await fetch(
@@ -41,13 +57,13 @@ Deno.serve(async (req) => {
   // GitHub returns 204 with no body on success.
   if (resp.status === 204) {
     return new Response(JSON.stringify({ ok: true }), {
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", ...CORS_HEADERS },
     });
   }
 
   const text = await resp.text();
   return new Response(JSON.stringify({ ok: false, status: resp.status, detail: text }), {
     status: 502,
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", ...CORS_HEADERS },
   });
 });
