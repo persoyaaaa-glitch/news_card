@@ -11,7 +11,8 @@ import textwrap
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 CANVAS_W, CANVAS_H = 1080, 1350       # Instagram portrait
-IMAGE_H = 780                          # photo area height
+IMAGE_H = 660                          # photo area height
+LOGO_SIZE = 140                        # brand logo badge, bottom-right corner
 PANEL_H = CANVAS_H - IMAGE_H           # text panel height
 
 BG_COLOR = (18, 18, 20)                # near-black panel background
@@ -433,41 +434,86 @@ def build_news_card(
     # short headlines render bigger and fill the space, long ones shrink
     # to fit, and the block is vertically centered in that panel.
     #
-    # The logo badge sits bottom-right, above the source line - if the
-    # headline panel extended all the way down to the divider, a big
-    # autofit font could land its last line right behind the logo. So the
-    # panel bottom is capped above the logo's top edge whenever a logo
-    # will actually be drawn.
+    # The logo badge sits bottom-right, above the source line. It only
+    # occupies a 140x140 corner, not the full width - so we don't reserve
+    # its height across the whole panel up front (that wasted a lot of
+    # vertical space on every card, forcing headlines smaller than they
+    # needed to be). Instead: fit against the FULL panel height first,
+    # then only if the actual last line's rendered box would genuinely
+    # overlap the logo's corner, refit against a height that avoids it.
     max_text_width = CANVAS_W - 2 * pad_x
     panel_top = IMAGE_H + 45
     meta_y = CANVAS_H - 70
-    logo_reserved_gap = 24
-    logo_top = meta_y - 20 - 30 - 140  # mirrors the logo geometry computed below
-    panel_bottom = CANVAS_H - 90  # top of the source-line divider
-    if _os.path.exists(theme["logo"]):
-        panel_bottom = min(panel_bottom, logo_top - logo_reserved_gap)
-    available_h = panel_bottom - panel_top
+    logo_reserved_gap = 45
+    logo_top = (CANVAS_H - pad_y) - LOGO_SIZE  # logo now sits low, near the true bottom edge
+    logo_left = CANVAS_W - pad_x - LOGO_SIZE
+    panel_bottom_full = CANVAS_H - 90  # top of the source-line divider
+    available_h = panel_bottom_full - panel_top
+
+    headline_font_path = headline_font
     headline_font, wrapped, line_height = _autofit_text(
-        draw, headline, headline_font, max_text_width, available_h,
-        max_size=104, min_size=36, variation="Bold", line_spacing_extra=16,
+        draw, headline, headline_font_path, max_text_width, available_h,
+        max_size=162, min_size=56, variation="Bold", line_spacing_extra=10,
     )
     block_h = line_height * len(wrapped)
     text_y = panel_top + max(0, (available_h - block_h) // 2)
+
+    if _os.path.exists(theme["logo"]) and wrapped:
+        last_line_bottom = text_y + line_height * len(wrapped)
+        if last_line_bottom > logo_top - logo_reserved_gap:
+            last_line_bbox = draw.textbbox((0, 0), wrapped[-1], font=headline_font)
+            last_line_w = last_line_bbox[2] - last_line_bbox[0]
+            last_line_x_start = pad_x + (max_text_width - last_line_w) // 2
+            last_line_x_end = last_line_x_start + last_line_w
+            # Only re-fit into the smaller box if the last line would
+            # actually reach into the logo's horizontal corner too -
+            # most centered short lines never get that far right.
+            if last_line_x_end > logo_left - logo_reserved_gap:
+                available_h = (logo_top - logo_reserved_gap) - panel_top
+                headline_font, wrapped, line_height = _autofit_text(
+                    draw, headline, headline_font_path, max_text_width, available_h,
+                    max_size=162, min_size=56, variation="Bold", line_spacing_extra=10,
+                )
+                block_h = line_height * len(wrapped)
+                text_y = panel_top + max(0, (available_h - block_h) // 2)
+
+    # _autofit_text steps the font size down in fixed increments, and word
+    # wrap can jump from N to N+1 lines right at the step where a bigger
+    # size would technically fit - so the chosen size sometimes leaves a
+    # visible gap below available_h even though it's the largest that fits.
+    # Stretch the line spacing (not the glyph size) to close that gap, so
+    # the block actually fills the full panel instead of floating in it
+    # with dead space.
+    if len(wrapped) > 0:
+        stretched_line_height = max(line_height, available_h // len(wrapped))
+        line_height = stretched_line_height
+        block_h = line_height * len(wrapped)
+        text_y = panel_top + max(0, (available_h - block_h) // 2)
+
     # Grayscale cards get a plain white/light-gray headline instead of
     # the day's theme color, keeping the whole card black-and-white.
     gradient_stops = ["#ffffff", "#e0e0e0", "#ffffff", "#f2f2f2", "#ffffff"] if grayscale else theme["gradient"]
     _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_height, gradient_stops,
                          block_width=max_text_width, center=True)
 
-    # --- source / meta line at the bottom of the panel ---
+    # --- source / meta line at the bottom of the panel, and the brand logo ---
+    # Logo sits low, close to the true bottom edge (same margin as pad_x/pad_y
+    # elsewhere), rather than stacked right above the divider - this frees up
+    # a lot more of the panel above for the headline. The divider line stops
+    # short of the logo's footprint instead of running a full-width line
+    # straight past/under it.
     meta_font = _load_font(FONT_META, 26, variation="Bold")
-    draw.line([(pad_x, meta_y - 20), (CANVAS_W - pad_x, meta_y - 20)], fill=(60, 60, 64), width=2)
+    logo_bottom_y = CANVAS_H - pad_y
+    logo_x_gap = 24  # breathing room between the line's end and the logo
+    line_end_x = CANVAS_W - pad_x
+    if _os.path.exists(theme["logo"]):
+        line_end_x = (CANVAS_W - pad_x - LOGO_SIZE) - logo_x_gap
+    draw.line([(pad_x, meta_y - 20), (line_end_x, meta_y - 20)], fill=(60, 60, 64), width=2)
     draw.text((pad_x, meta_y), source.upper(), font=meta_font, fill=MUTED_COLOR)
 
     # --- brand logo, bottom-right corner (square badge) ---
-    # Sits above the source line/divider so it doesn't overlap it.
     if _os.path.exists(theme["logo"]):
-        _draw_logo(canvas, pad_x, meta_y - 20 - 30,
+        _draw_logo(canvas, pad_x, logo_bottom_y, logo_size=LOGO_SIZE,
                    logo_path=_os.path.join(_ASSETS_DIR, "logo_black_white.png") if grayscale else theme["logo"])
 
     canvas.save(out_path, "JPEG", quality=92)
