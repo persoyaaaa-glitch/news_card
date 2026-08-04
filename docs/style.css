@@ -119,6 +119,20 @@ body{
 .download-all-btn:disabled{opacity:.6;}
 .download-status{text-align:center;font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px;}
 
+.manual-btn{
+  width:100%;margin-top:10px;padding:13px;border-radius:10px;
+  background:transparent;border:1px solid var(--line);color:var(--text);
+  font-family:'Archivo',sans-serif;font-weight:700;font-size:14px;cursor:pointer;
+}
+.manual-btn:disabled{opacity:.7;border-color:var(--amber);color:var(--amber);}
+.manual-status{text-align:center;font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px;}
+.manual-tag{
+  font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.05em;
+  color:var(--amber);border:1px solid var(--amber);border-radius:5px;
+  padding:1px 5px;margin-left:6px;vertical-align:middle;
+}
+.slot-row.manual{border-color:var(--amber);}
+
 .caption-block{
   margin-top:18px;background:var(--panel);border:1px solid var(--line);
   border-radius:12px;padding:14px;
