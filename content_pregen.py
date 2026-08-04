@@ -1,34 +1,37 @@
 """
 content_pregen.py
-Runs once a day, right at IST midnight (triggered by a separate GitHub
-Actions cron entry - see scheduler.yml). Builds the FULL carousel
-(images + caption + hashtags) for every slot in today's schedule up
-front, instead of daily_scheduler.py building each one fresh at post
-time.
+Runs on the same 30-min cadence as daily_scheduler.py --check-once (see
+scheduler.yml), as a step BEFORE the check-and-post step. Builds the
+full carousel (images + caption + hashtags) for any slot whose post
+time is coming up within BUILD_WINDOW_MINUTES and hasn't been built
+yet - NOT the whole day at once.
 
-Why: the companion PWA needs to show you tomorrow's whole lineup (all
-slide images + captions) as soon as the day starts, and needs a
-15-minutes-before notification with real content behind it - which is
-only possible if that content already exists well before the post
-time, not built in the same few seconds the post fires.
+Why a rolling 30-min-ahead build instead of "everything at midnight":
+the schedule (bare timestamps) is announced to the companion PWA right
+at midnight, but which actual news stories go into each slot is only
+decided shortly before that slot fires. This mirrors how you'd want to
+review it - each slot's real content shows up in the app not long
+before you'd need to act on it (view manually / let it auto-post), not
+a whole day of picks made in a single midnight run.
 
 Each slot's stories are marked "posted" in Supabase (posted_articles)
 the moment they're chosen here, NOT when actually published to
-Instagram later. This is deliberate: it's what stops slot #2's build
-from picking the same top headline slot #1 already claimed a few
-minutes earlier in this same run. The trade-off: if a slot's actual
-Instagram publish later fails outright (rare - see hourly_run's
-verify-against-the-real-feed safety net), that slot's stories are
-still "spent" and won't be recycled into a future post. Given how
-rarely that happens and how bad true duplicate/near-duplicate posting
-is for the account, that trade-off is the right one.
+Instagram later. This is deliberate: it's what stops one slot's build
+from picking the same top headline another slot already claimed
+minutes earlier. The trade-off: if a slot's actual Instagram publish
+later fails outright (rare - see hourly_run's verify-against-the-real-
+feed safety net), that slot's stories are still "spent" and won't be
+recycled into a future post. Given how rarely that happens and how bad
+true duplicate/near-duplicate posting is for the account, that
+trade-off is the right one.
 
 Safe to re-run: any slot that already has content from an earlier
-attempt today is skipped, so a failed/interrupted run can just be
-re-triggered (e.g. via workflow_dispatch) without rebuilding
-everything from scratch or double-reserving stories.
+attempt is skipped, so a failed/interrupted run just gets picked back
+up on the next 30-min tick without rebuilding or double-reserving
+stories.
 """
 import traceback
+from datetime import datetime
 
 import hourly_run
 from daily_scheduler import (
@@ -36,6 +39,8 @@ from daily_scheduler import (
     _ensure_today_schedule_remote, _load_state_remote, today_ist, now_ist,
 )
 from supabase_client import get_state, save_state
+
+BUILD_WINDOW_MINUTES = 30  # build a slot once its post time is this close (or closer/overdue)
 
 
 def _load_slots_state() -> dict:
@@ -58,19 +63,26 @@ def pregenerate_today():
     schedule_state = _ensure_today_schedule_remote(_load_state_remote())
     planned_times = schedule_state["planned_times"]
     slots_state = _load_slots_state()
+    now = now_ist()
 
-    print(f"[{now_ist().isoformat()}] Pre-generating content for {len(planned_times)} "
-          f"slot(s) planned today ({today_ist().isoformat()})...")
+    due_for_build = [
+        (i, iso_time) for i, iso_time in enumerate(planned_times)
+        if not _already_built(slots_state, i)
+        and (datetime.fromisoformat(iso_time) - now).total_seconds() / 60 <= BUILD_WINDOW_MINUTES
+    ]
+
+    if not due_for_build:
+        print(f"[{now.isoformat()}] No slot within {BUILD_WINDOW_MINUTES} min of its post "
+              f"time that still needs content built.")
+        return
+
+    print(f"[{now.isoformat()}] Building content for {len(due_for_build)} slot(s) now "
+          f"within the {BUILD_WINDOW_MINUTES}-min build window...")
 
     built = 0
-    skipped = 0
     failed = 0
 
-    for index, iso_time in enumerate(planned_times):
-        if _already_built(slots_state, index):
-            skipped += 1
-            continue
-
+    for index, iso_time in due_for_build:
         print(f"\n[slot {index + 1}/{len(planned_times)}] planned {iso_time} - building...")
         try:
             result = hourly_run.run_combined(
@@ -92,7 +104,7 @@ def pregenerate_today():
             failed += 1
             continue
 
-        slots_state["slots"].append({
+        built_slot = {
             "index": index,
             "planned_time": iso_time,
             "image_urls": result["image_urls"],
@@ -101,14 +113,19 @@ def pregenerate_today():
                 {"title": r["title"], "source": r["source"], "is_sensitive": r.get("is_sensitive", False)}
                 for r in result["results"]
             ],
-        })
+        }
+        # Replace the empty skeleton entry for this index (written at midnight
+        # by _publish_schedule_skeleton) in place, rather than appending a
+        # second row for the same slot.
+        slots_state["slots"] = [s for s in slots_state["slots"] if s.get("index") != index]
+        slots_state["slots"].append(built_slot)
         _save_slots_state(slots_state)  # save after each slot - a mid-run interruption loses nothing
         built += 1
         print(f"[slot {index + 1}] built: {len(result['results'])} stories, "
               f"{len(result['image_urls'])} images.")
 
-    print(f"\n[{now_ist().isoformat()}] Pre-generation done: {built} built, "
-          f"{skipped} already-built (skipped), {failed} failed (will build fresh at post time).")
+    print(f"\n[{now_ist().isoformat()}] Content build pass done: {built} built, "
+          f"{failed} failed (will retry on a later tick or build fresh at post time).")
 
 
 if __name__ == "__main__":
