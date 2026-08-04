@@ -58,8 +58,8 @@ def now_ist() -> datetime:
 def today_ist() -> date:
     return now_ist().date()
 
-MIN_POSTS_PER_DAY = 3
-MAX_POSTS_PER_DAY = 5
+MIN_POSTS_PER_DAY = 9
+MAX_POSTS_PER_DAY = 13
 
 # The PWA can override today's post count via the schedule_overrides table
 # (anon-writable, like slot_overrides/push_subscriptions - see
