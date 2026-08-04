@@ -27,6 +27,8 @@ jobs:
   check-and-post:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    permissions:
+      contents: write  # needed for the repo Traffic API (fetch_repo_traffic.py) - push access is required to read it, read-only isn't enough
     steps:
       - uses: actions/checkout@v4
 
@@ -65,3 +67,10 @@ jobs:
           VAPID_PRIVATE_KEY: ${{ secrets.VAPID_PRIVATE_KEY }}
           VAPID_SUBJECT: ${{ secrets.VAPID_SUBJECT }}
         run: python send_notifications.py
+
+      - name: Fetch and store this repo's traffic (for the PWA's visitor count)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python fetch_repo_traffic.py
