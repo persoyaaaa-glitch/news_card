@@ -73,4 +73,5 @@ jobs:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO_TRAFFIC_PAT: ${{ secrets.REPO_TRAFFIC_PAT }}
         run: python fetch_repo_traffic.py
