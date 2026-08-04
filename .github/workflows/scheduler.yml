@@ -20,7 +20,7 @@ on:
     #      checked against the real IG feed instead of auto-posted.
     #   4. Send push notifications: the once-a-day "schedule's ready"
     #      alert, and each slot's 15-minutes-before alert.
-    - cron: "*/30 * * * *"
+    - cron: "7,37 * * * *"
   workflow_dispatch: {}  # lets you trigger a check manually from the Actions tab
 
 jobs:
