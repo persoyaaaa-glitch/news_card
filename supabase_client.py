@@ -144,5 +144,13 @@ def save_state(key: str, value):
     }).execute()
 
 
+def get_manual_slot_indices(slot_date: str) -> set:
+    """Slot indices the PWA has flagged as 'I'm posting this one myself'
+    for the given date (see slot_overrides table / supabase_app_additions.sql)."""
+    client = get_client()
+    resp = client.table("slot_overrides").select("slot_index").eq("slot_date", slot_date).execute()
+    return {row["slot_index"] for row in resp.data}
+
+
 if __name__ == "__main__":
     print("Set SUPABASE_URL and SUPABASE_SERVICE_KEY, then import functions from this module.")
