@@ -75,10 +75,19 @@ MAX_ALLOWED_POSTS_PER_DAY = 15
 STORIES_PER_POST = 5
 IMAGES_PER_STORY = 2
 
-# Minimum gap enforced between any two consecutive posts, so a busy
-# random draw can't accidentally cluster several posts back-to-back
-# (which would read as spammy no matter how the times were chosen).
+# Minimum gap enforced between any two consecutive posts AT SCHEDULE-
+# GENERATION TIME - this is what keeps a normal day's planned timestamps
+# spread out and non-spammy. It is NOT used to delay a post that is
+# already due; see CATCHUP_GAP_SECONDS below for that.
 MIN_GAP_MINUTES = 25
+
+# Once a slot's planned timestamp has passed, it is due and gets posted
+# on the very next tick - no waiting on MIN_GAP_MINUTES. The only gap
+# still enforced at that point is this much smaller one, purely to avoid
+# firing two posts in the exact same instant when several slots are
+# overdue at once (e.g. after downtime) and get caught by the same
+# check_once() run.
+CATCHUP_GAP_SECONDS = 150  # 2.5 minutes
 
 # How often the main loop wakes up to check whether it's time to post.
 # Coarse enough to be cheap, fine enough that posts fire within a minute
@@ -452,10 +461,14 @@ def check_once():
     All "today"/"now" here means IST, regardless of the server's own
     clock.
 
-    Fires AT MOST ONE post per invocation - the single earliest overdue,
-    not-yet-posted slot that also clears MIN_GAP_MINUTES since the last
-    post - then exits. Safe to call as often as you like; it's a no-op
-    if nothing is currently due.
+    Fires EVERY overdue, not-yet-posted, non-Manual slot found in one
+    pass, in timestamp order - a due post is the first priority and is
+    never held back to preserve spacing. The only gap still enforced
+    between posts is CATCHUP_GAP_SECONDS (2.5 min), just so a pile of
+    simultaneously-overdue slots (e.g. after downtime) don't fire in the
+    same instant; it never delays a single overdue post waiting on its
+    own. Safe to call as often as you like; it's a no-op if nothing is
+    currently due.
 
     If content_pregen.py already built this slot's carousel earlier
     (the companion app's rolling "content ready ~30 min ahead" feature),
@@ -474,7 +487,10 @@ def check_once():
     now = now_ist()
     manual_indices = get_manual_slot_indices(state["date"])
 
-    due_index = None
+    # Collect every overdue, not-yet-posted slot up front, in timestamp
+    # order. Manual slots are checked against the real feed inline (as
+    # before) and never enter this list.
+    due_indices = []
     for i, iso_time in enumerate(state["planned_times"]):
         if state["posted"][i]:
             continue
@@ -483,54 +499,61 @@ def check_once():
         if i in manual_indices:
             _check_manual_slot(state, i)
             continue  # never auto-post a manual slot - just check if you posted it yourself
-        due_index = i
-        break
+        due_indices.append(i)
 
-    if due_index is None:
+    if not due_indices:
         print(f"[{now.isoformat()}] Nothing due for auto-posting right now. "
               f"{sum(state['posted'])}/{len(state['posted'])} posted today.")
         return
 
-    last_post_iso = state.get("last_post_time")
-    last_post_dt = datetime.fromisoformat(last_post_iso) if last_post_iso else None
-    gap_ok = last_post_dt is None or (now - last_post_dt).total_seconds() >= MIN_GAP_MINUTES * 60
+    print(f"[{now.isoformat()}] {len(due_indices)} slot(s) overdue - "
+          f"posting all of them now, in order.")
 
-    if not gap_ok:
-        print(f"[{now.isoformat()}] Slot #{due_index + 1} is overdue but the "
-              f"minimum gap since the last post hasn't elapsed yet - waiting for a later run.")
-        return
-
-    planned_dt = datetime.fromisoformat(state["planned_times"][due_index])
-    print(f"[{now.isoformat()}] Firing scheduled post "
-          f"#{due_index + 1}/{len(state['planned_times'])} "
-          f"(planned {planned_dt.strftime('%H:%M')} IST)")
-    success = False
-    try:
-        prebuilt = _get_prebuilt_slot(due_index)
-        if prebuilt:
-            success = _publish_prebuilt_slot(prebuilt)
-        else:
-            print("  -> no pre-built content found for this slot - building fresh now.")
-            hourly_run.run_combined(
-                story_count=STORIES_PER_POST,
-                images_per_story=IMAGES_PER_STORY,
-                apply_jitter=False,
-            )
-            success = True
-    except Exception:
-        print("Post attempt failed - will not retry this slot, "
-              "continuing with the rest of today's schedule.")
-        traceback.print_exc()
-        success = False
-
-    state["posted"][due_index] = True
     if "failed" not in state:
         state["failed"] = [False] * len(state["planned_times"])
-    state["failed"][due_index] = not success
-    if success:
-        state["last_post_time"] = now_ist().isoformat()
-    _save_state_remote(state)
-    _push_slot_status_remote(due_index, success)
+
+    for due_index in due_indices:
+        # CATCHUP_GAP_SECONDS only protects against firing two posts in
+        # the same instant when a batch of slots is overdue together; it
+        # never holds a post back to preserve normal-day spacing (that's
+        # MIN_GAP_MINUTES's job, applied only when the schedule is first
+        # generated). If the gap hasn't cleared yet, just wait a beat and
+        # re-check rather than skipping the slot to a later run.
+        last_post_iso = state.get("last_post_time")
+        if last_post_iso:
+            elapsed = (now_ist() - datetime.fromisoformat(last_post_iso)).total_seconds()
+            if elapsed < CATCHUP_GAP_SECONDS:
+                time.sleep(CATCHUP_GAP_SECONDS - elapsed)
+
+        planned_dt = datetime.fromisoformat(state["planned_times"][due_index])
+        print(f"[{now_ist().isoformat()}] Firing scheduled post "
+              f"#{due_index + 1}/{len(state['planned_times'])} "
+              f"(planned {planned_dt.strftime('%H:%M')} IST)")
+        success = False
+        try:
+            prebuilt = _get_prebuilt_slot(due_index)
+            if prebuilt:
+                success = _publish_prebuilt_slot(prebuilt)
+            else:
+                print("  -> no pre-built content found for this slot - building fresh now.")
+                hourly_run.run_combined(
+                    story_count=STORIES_PER_POST,
+                    images_per_story=IMAGES_PER_STORY,
+                    apply_jitter=False,
+                )
+                success = True
+        except Exception:
+            print("Post attempt failed - will not retry this slot, "
+                  "continuing with the rest of today's schedule.")
+            traceback.print_exc()
+            success = False
+
+        state["posted"][due_index] = True
+        state["failed"][due_index] = not success
+        if success:
+            state["last_post_time"] = now_ist().isoformat()
+        _save_state_remote(state)  # save after each slot - a mid-run interruption loses nothing
+        _push_slot_status_remote(due_index, success)
 
 
 def run_forever():
@@ -548,12 +571,14 @@ def run_forever():
             state = _ensure_today_schedule(state)  # only re-plans on an actual day rollover
         now = datetime.now()
 
-        # Only ever fire the SINGLE earliest overdue, not-yet-posted slot
-        # per pass - not every overdue slot in one go. If the process
-        # started late (or is catching up after being stopped for a
-        # while), there may be several slots simultaneously "due"; firing
-        # them all back-to-back would blow through MIN_GAP_MINUTES, which
-        # is exactly what was happening before this fix.
+        # Fires the single earliest overdue, not-yet-posted slot per pass
+        # - the 30s poll loop means the NEXT overdue slot (if any) gets
+        # picked up moments later anyway, so this never sits on a backlog.
+        # The only gap enforced here is CATCHUP_GAP_SECONDS, purely so two
+        # simultaneously-overdue slots don't fire in the very same
+        # instant - it never holds a single overdue post back waiting on
+        # MIN_GAP_MINUTES (that constant only shapes spacing when a day's
+        # schedule is first generated, not when a post is already due).
         due_index = None
         for i, iso_time in enumerate(state["planned_times"]):
             if state["posted"][i]:
@@ -565,7 +590,7 @@ def run_forever():
         if due_index is not None:
             last_post_iso = state.get("last_post_time")
             last_post_dt = datetime.fromisoformat(last_post_iso) if last_post_iso else None
-            gap_ok = last_post_dt is None or (now - last_post_dt).total_seconds() >= MIN_GAP_MINUTES * 60
+            gap_ok = last_post_dt is None or (now - last_post_dt).total_seconds() >= CATCHUP_GAP_SECONDS
 
             if gap_ok:
                 planned_dt = datetime.fromisoformat(state["planned_times"][due_index])
