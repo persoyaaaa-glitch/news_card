@@ -307,6 +307,7 @@ def _apply_schedule_overrides(state: dict) -> dict:
                 state["planned_times"].append(t.isoformat())
                 state["posted"].append(False)
                 state["notified"].append(False)
+                state["failed"].append(False)
             changed = True
         elif desired_pending < len(pending_indices):
             # Trim from the latest-planned pending slots first, so anything
@@ -316,6 +317,7 @@ def _apply_schedule_overrides(state: dict) -> dict:
                 del state["planned_times"][i]
                 del state["posted"][i]
                 del state["notified"][i]
+                del state["failed"][i]
             changed = True
 
     if changed:
@@ -548,11 +550,27 @@ def check_once():
             traceback.print_exc()
             success = False
 
-        state["posted"][due_index] = True
-        state["failed"][due_index] = not success
-        if success:
-            state["last_post_time"] = now_ist().isoformat()
-        _save_state_remote(state)  # save after each slot - a mid-run interruption loses nothing
+        # Defensive pad: state["posted"]/["failed"] should always be kept in
+        # sync with state["planned_times"] by _apply_schedule_overrides(),
+        # but if they're ever short for any reason, extend rather than
+        # IndexError here - a crash on this line, after a real Instagram
+        # publish already succeeded, is exactly what caused slots to get
+        # re-posted on the next tick (the "posted" flag never made it to
+        # Supabase because the crash happened before _save_state_remote).
+        while len(state["posted"]) <= due_index:
+            state["posted"].append(False)
+        while len(state["failed"]) <= due_index:
+            state["failed"].append(False)
+
+        try:
+            state["posted"][due_index] = True
+            state["failed"][due_index] = not success
+            if success:
+                state["last_post_time"] = now_ist().isoformat()
+        finally:
+            # Always persist, even if something above this line misbehaves -
+            # a real publish must never be lost from state.
+            _save_state_remote(state)  # save after each slot - a mid-run interruption loses nothing
         _push_slot_status_remote(due_index, success)
 
 
