@@ -22,7 +22,9 @@ on:
     #      alert, and each slot's 15-minutes-before alert.
     - cron: "7,37 * * * *"
   workflow_dispatch: {}  # lets you trigger a check manually from the Actions tab
-
+concurrency:
+  group: news-carousel-scheduler
+  cancel-in-progress: false
 jobs:
   check-and-post:
     runs-on: ubuntu-latest
