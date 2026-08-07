@@ -116,7 +116,11 @@ def pregenerate_today():
             "image_urls_hi": result.get("image_urls_hi", []),
             "caption_hi": result.get("caption_hi", ""),
             "stories": [
-                {"title": r["title"], "source": r["source"], "is_sensitive": r.get("is_sensitive", False)}
+                {"title": r["title"], "source": r["source"], "is_sensitive": r.get("is_sensitive", False),
+                 # Only present when POST_HINDI is on and this story's translation
+                 # succeeded (see hourly_run.run_combined) - the PWA falls back to
+                 # the English title if this is missing.
+                 "title_hi": r.get("headline_hi", "")}
                 for r in result["results"]
             ],
         }
