@@ -951,5 +951,134 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
             "media_id_hi": media_id_hi, "caption_hi": caption_hi, "image_urls_hi": public_urls_hi}
 
 
+def build_single_caption_hindi(caption_en: str) -> str:
+    """
+    Hindi counterpart to build_caption for a single-story post: translates
+    the finished English caption (headline copy + hashtags) into Hindi
+    with a fresh Hindi-relevant hashtag set, same pattern as
+    build_combined_caption_hindi but for exactly one story. Falls back to
+    the English caption text with a templated Hindi hashtag set appended
+    if translation fails, mirroring the other fallbacks in this file.
+    """
+    translated = translate_caption_to_hindi(caption_en)
+    if translated:
+        hashtags = translated["hashtags"]
+        if len(hashtags) < 10:
+            fallback_tags = ["#IndiaNews", "#HindiNews", "#आजकीखबर", "#Trending",
+                              "#BreakingNews", "#DailyNews", "#WorldNews", "#NewsUpdate",
+                              "#CurrentAffairs", "#NewsToday"]
+            for tag in fallback_tags:
+                if len(hashtags) >= 10:
+                    break
+                if tag not in hashtags:
+                    hashtags.append(tag)
+        return "\n\n".join([translated["caption"], " ".join(hashtags)])
+
+    print("  -> [hi] caption translation failed, falling back to the English caption + templated Hindi hashtags")
+    return caption_en + (
+        "\n\n#IndiaNews #HindiNews #आजकीखबर #Trending #BreakingNews "
+        "#DailyNews #WorldNews #NewsUpdate #CurrentAffairs #NewsToday"
+    )
+
+
+def run_hindi_test(max_attempts: int = 30, dry_run: bool = True) -> dict | None:
+    """
+    Standalone test path for the Hindi sister page ONLY. Finds one real,
+    not-yet-posted story exactly like run() does, but instead of posting
+    it in English, translates it and posts (or previews) the Hindi
+    carousel to the Hindi Instagram account.
+
+    Deliberately never touches the English account (ensure_token_fresh is
+    only called for account="hi" here, and post_carousel_to_instagram /
+    post_to_instagram are only ever called with account="hi"), and
+    deliberately never calls mark_as_posted - so a Hindi test run leaves
+    the story completely untouched for the real automated pipeline. It
+    can still be picked up and posted for real later (English or a real
+    combined run) without being skipped as a duplicate.
+
+    dry_run=True (default): builds everything - source photo/text,
+    English draft caption (used only as translation input, never
+    posted), the Hindi translation, and the Hindi carousel images - and
+    returns/prints it, but does not upload or publish anything.
+
+    dry_run=False: actually publishes the Hindi carousel to the Hindi
+    Instagram account for real. Still never touches English and never
+    marks anything as posted.
+    """
+    ensure_token_fresh(account="hi")
+
+    os.makedirs(TMP_DIR, exist_ok=True)
+    os.makedirs(CARD_DIR, exist_ok=True)
+
+    print(f"[{datetime.now().isoformat()}] [hi-test] Surfacing candidates...")
+    articles = fetch_best_and_breaking_news(country="IN", limit_per_query=max_attempts, include_global=True)
+    if not articles:
+        print("[hi-test] No articles returned. Exiting.")
+        return None
+
+    recent_titles = get_recent_titles()
+    theme = random.choice(HEADLINE_THEMES)
+
+    for article in articles:
+        title, link, source = article["title"], article["link"], article["source"] or "News"
+
+        if is_duplicate_story(title, link, recent_titles=recent_titles):
+            print(f"[hi-test] Skipping (already posted / near-duplicate): {title[:60]}")
+            continue
+
+        result = _build_post(article, theme=theme)
+        if result is None:
+            continue  # no usable image for this story - try the next one
+
+        print(f"  -> [hi-test] translating '{title[:60]}'...")
+        hi = _build_hindi_slides(result, theme=theme)
+        if hi is None:
+            print("  -> [hi-test] translation failed for this story, trying the next candidate...")
+            continue
+
+        caption_hi = build_single_caption_hindi(result["caption"])
+        slide_paths_hi = hi["slide_paths"]
+
+        preview = {
+            "title": title, "source": source, "link": link,
+            "headline_hi": hi["headline_hi"], "slide_paths_hi": slide_paths_hi,
+            "caption_hi": caption_hi,
+        }
+
+        if dry_run:
+            print(f"  -> [hi-test][DRY RUN] built {len(slide_paths_hi)} Hindi slide(s), "
+                  f"skipping upload/publish. English side was NOT touched or posted.")
+            return preview
+
+        print(f"  -> [hi-test] uploading {len(slide_paths_hi)} Hindi slide(s) to Supabase Storage...")
+        public_urls_hi = upload_carousel_images(slide_paths_hi)
+
+        print("  -> [hi-test] posting to the Hindi Instagram account only...")
+        try:
+            if len(public_urls_hi) >= 2:
+                media_id_hi = post_carousel_to_instagram(public_urls_hi, caption_hi, account="hi")
+            else:
+                media_id_hi = post_to_instagram(public_urls_hi[0], caption_hi, account="hi")
+        except Exception as e:
+            print(f"  -> [hi-test] Instagram publish failed (hi): {e}")
+            print("  -> [hi-test] checking the Hindi account's recent media in case it actually "
+                  "posted despite the error...")
+            media_id_hi = find_recent_matching_post(caption_hi, account="hi")
+            if media_id_hi:
+                print(f"  -> [hi-test] confirmed: post {media_id_hi} actually went live despite the error.")
+            else:
+                print("  -> [hi-test] confirmed: it genuinely did not post.")
+                return None
+
+        preview["media_id_hi"] = media_id_hi
+        print(f"\n[hi-test] Done: posted to the Hindi account. Media ID: {media_id_hi}")
+        print("[hi-test] Note: this story was NOT marked as posted, so it's still fully "
+              "available for the real English/combined pipeline.")
+        return preview
+
+    print("[hi-test] No usable, non-duplicate candidate found in this batch. Try again, or raise max_attempts.")
+    return None
+
+
 if __name__ == "__main__":
     run_combined(story_count=5, images_per_story=2)
