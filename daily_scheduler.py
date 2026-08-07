@@ -237,25 +237,62 @@ def _publish_schedule_skeleton(today_str: str, planned: list):
     })
 
 
+def _resort_state_by_time(state: dict):
+    """
+    Re-sorts every parallel array in `state` (planned_times/posted/
+    notified/failed) into ascending time order and reassigns indices to
+    match that order.
+
+    Without this, growing the schedule (see _apply_schedule_overrides)
+    would simply append the new times to the end of the lists - even
+    though a freshly-drawn time can easily land *earlier* than an
+    already-pending slot (they're both just random draws inside the same
+    PEAK_WINDOWS). Since the PWA displays/sorts slots by their `index`,
+    those newly-added-but-earlier posts would show up at the bottom of
+    the list instead of where they actually belong in the day's running
+    order. Sorting here keeps index == chronological order, which is the
+    invariant the rest of the pipeline (and the app) assumes.
+
+    Safe to call any time state's lists change shape; it's a no-op if
+    everything is already in time order.
+    """
+    rows = list(zip(
+        state["planned_times"], state["posted"], state["notified"], state["failed"],
+    ))
+    rows.sort(key=lambda r: r[0])  # ISO 8601 strings sort chronologically as strings
+    state["planned_times"] = [r[0] for r in rows]
+    state["posted"] = [r[1] for r in rows]
+    state["notified"] = [r[2] for r in rows]
+    state["failed"] = [r[3] for r in rows]
+
+
 def _resync_daily_slots_skeleton(state: dict):
     """
     Rewrites app_state[SLOTS_KEY] to match state['planned_times'] after an
     override adds/removes/moves slots, WITHOUT losing any content that
-    content_pregen.py already built for a slot that still exists at the
-    same index. Removed indices simply drop out; new indices get an empty
-    skeleton entry, same as _publish_schedule_skeleton does at midnight.
+    content_pregen.py already built for a slot that still exists.
+
+    Matches prior slots to new slots by their planned_time value (not by
+    index) - state's arrays may have just been re-sorted by
+    _resort_state_by_time, so a slot's position can shift even when its
+    own timestamp hasn't changed. Matching on the timestamp itself keeps
+    already-built content attached to the correct time instead of
+    silently jumping to whatever slot now happens to sit at the old
+    index. Slots with a changed/removed timestamp simply get a fresh
+    empty skeleton entry, same as _publish_schedule_skeleton does at
+    midnight.
     """
     today_str = state["date"]
     slots_state = get_state(SLOTS_KEY, default={})
-    existing_by_index = {}
+    existing_by_time = {}
     if slots_state.get("date") == today_str:
-        existing_by_index = {s["index"]: s for s in slots_state.get("slots", [])}
+        existing_by_time = {s["planned_time"]: s for s in slots_state.get("slots", [])}
 
     new_slots = []
     for i, iso_time in enumerate(state["planned_times"]):
-        prior = existing_by_index.get(i)
+        prior = existing_by_time.get(iso_time)
         if prior and prior.get("image_urls"):
-            prior["planned_time"] = iso_time  # keep built content, just refresh the timestamp
+            prior["index"] = i  # position may have shifted after a resort - refresh it
             new_slots.append(prior)
         else:
             new_slots.append({"index": i, "planned_time": iso_time, "image_urls": [], "caption": "", "stories": []})
@@ -321,6 +358,7 @@ def _apply_schedule_overrides(state: dict) -> dict:
             changed = True
 
     if changed:
+        _resort_state_by_time(state)  # keep index order == time order (see docstring)
         _save_state_remote(state)
         _resync_daily_slots_skeleton(state)
         print(f"[{now_ist().isoformat()}] Applied schedule override from the app: "
