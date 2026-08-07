@@ -139,19 +139,24 @@ _FONT_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "fonts_h
 # routing needed the way the old Inknut/League setup required.
 FONT_FAMILIES = {
     "kalam": {
-        "headline": _os.path.join(_FONT_DIR, "Kalam-Bold.ttf"),
-        "body": _os.path.join(_FONT_DIR, "Kalam-Regular.ttf"),
-        "tag": _os.path.join(_FONT_DIR, "Kalam-Bold.ttf"),
-        "meta": _os.path.join(_FONT_DIR, "Kalam-Regular.ttf"),
+        # Light is used for every role - Kalam's Bold cut is intentionally
+        # never referenced anywhere in this file.
+        "headline": _os.path.join(_FONT_DIR, "Kalam-Light.ttf"),
+        "body": _os.path.join(_FONT_DIR, "Kalam-Light.ttf"),
+        "tag": _os.path.join(_FONT_DIR, "Kalam-Light.ttf"),
+        "meta": _os.path.join(_FONT_DIR, "Kalam-Light.ttf"),
     },
     "eczar": {
         # Eczar has a full weight range and declares both dev2 + legacy
         # deva script tables, so it shapes correctly (verified) unlike
         # Tiro Devanagari Hindi, which was dropped for this reason.
-        "headline": _os.path.join(_FONT_DIR, "Eczar-ExtraBold.ttf"),
+        # Regular (400) is Eczar's lightest cut - its variable-font axis
+        # only goes from 400-800, there's no Light/Thin instance below
+        # Regular - so Regular is used for every role here, never Bold+.
+        "headline": _os.path.join(_FONT_DIR, "Eczar-Regular.ttf"),
         "body": _os.path.join(_FONT_DIR, "Eczar-Regular.ttf"),
-        "tag": _os.path.join(_FONT_DIR, "Eczar-Bold.ttf"),
-        "meta": _os.path.join(_FONT_DIR, "Eczar-SemiBold.ttf"),
+        "tag": _os.path.join(_FONT_DIR, "Eczar-Regular.ttf"),
+        "meta": _os.path.join(_FONT_DIR, "Eczar-Regular.ttf"),
     },
 }
 
