@@ -1,5 +1,6 @@
 """
 daily_scheduler.py
+
 Long-running process that posts somewhere between MIN_POSTS_PER_DAY and
 MAX_POSTS_PER_DAY times a day, at random times biased toward the hours
 when Instagram audiences are generally most active - never on a fixed
@@ -7,19 +8,19 @@ when Instagram audiences are generally most active - never on a fixed
 between consecutive posts).
 
 Each individual post still goes through hourly_run.run_combined(), which:
-  - surfaces news from many query angles (top headlines + explicit
-    "breaking news" + topical buckets + direct publisher feeds,
-    domestic and global), ranked best-to-worst by priority_score
-  - bundles the 5 highest-priority not-yet-posted stories into ONE
-    carousel post: 2 images per story (hook + detail) = 10 images,
-    Instagram's per-carousel cap, in priority order
-  - never reposts a story - checked both by exact link AND by fuzzy
-    title match, so the same event covered by a different outlet under
-    a reworded headline still gets caught
-  - writes one AI-generated round-up caption naming all 5 stories in
-    rank order, plus a merged hashtag set (10-15 tags)
-  - draws a red "BREAKING" badge on a story's slides ONLY when that
-    story is actually flagged as breaking
+- surfaces news from many query angles (top headlines + explicit
+  "breaking news" + topical buckets + direct publisher feeds,
+  domestic and global), ranked best-to-worst by priority_score
+- bundles the 5 highest-priority not-yet-posted stories into ONE
+  carousel post: 2 images per story (hook + detail) = 10 images,
+  Instagram's per-carousel cap, in priority order
+- never reposts a story - checked both by exact link AND by fuzzy
+  title match, so the same event covered by a different outlet under
+  a reworded headline still gets caught
+- writes one AI-generated round-up caption naming all 5 stories in
+  rank order, plus a merged hashtag set (10-15 tags)
+- draws a red "BREAKING" badge on a story's slides ONLY when that
+  story is actually flagged as breaking
 
 Run this as your one long-lived process instead of an hourly cron job:
     python daily_scheduler.py
@@ -29,6 +30,7 @@ scheduler_state.json next to this file, so a restart mid-day resumes
 correctly instead of re-planning (and potentially over-posting) or
 silently skipping the rest of the day.
 """
+
 import argparse
 import json
 import os
@@ -38,7 +40,7 @@ import traceback
 from datetime import datetime, timedelta, date, timezone
 
 import hourly_run
-from supabase_client import get_state, save_state, get_manual_slot_indices, get_schedule_override
+from supabase_client import get_state, save_state, get_manual_slot_indices
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_state.json")
 STATE_KEY = "scheduler_state"  # Supabase app_state key, used by check_once()
@@ -58,36 +60,34 @@ def now_ist() -> datetime:
 def today_ist() -> date:
     return now_ist().date()
 
-MIN_POSTS_PER_DAY = 9
-MAX_POSTS_PER_DAY = 13
 
-# The PWA can override today's post count via the schedule_overrides table
-# (anon-writable, like slot_overrides/push_subscriptions - see
-# supabase_app_additions.sql). This is a hard server-side ceiling applied
-# to whatever it requests, so a bad value written there can't blow up the
-# day's posting volume.
-MAX_ALLOWED_POSTS_PER_DAY = 20
+MIN_POSTS_PER_DAY = 3
+# Raised from 5 to 20 per request. At STORIES_PER_POST=5 this means up to
+# 20 * 5 = 100 stories/day (vs. 25/day before) - if that throughput ends up
+# too aggressive for the account, the more surgical knob to bring back down
+# is STORIES_PER_POST below, not this one.
+MAX_POSTS_PER_DAY = 20
 
 # Each "post" now bundles this many distinct stories into ONE combined
 # carousel (see hourly_run.run_combined) instead of one story per post -
 # so MIN/MAX_POSTS_PER_DAY x STORIES_PER_POST is the real daily story
-# throughput (e.g. 13-23 posts x 5 stories = 65-115 stories/day).
+# throughput (e.g. 3-20 posts x 5 stories = 15-100 stories/day).
 STORIES_PER_POST = 5
 IMAGES_PER_STORY = 2
 
-# Minimum gap enforced between any two consecutive posts AT SCHEDULE-
-# GENERATION TIME - this is what keeps a normal day's planned timestamps
-# spread out and non-spammy. It is NOT used to delay a post that is
-# already due; see CATCHUP_GAP_SECONDS below for that.
+# Minimum gap enforced between any two consecutive posts, so a busy
+# random draw can't accidentally cluster several posts back-to-back
+# (which would read as spammy no matter how the times were chosen).
+#
+# NOTE: with MAX_POSTS_PER_DAY now up to 20, double check this still
+# makes sense - 20 posts x 25 min minimum gap = 500 minutes (~8.3 hours)
+# of forced minimum spacing alone, which comfortably fits inside the
+# PEAK_WINDOWS below (roughly 7:00-23:45 IST, ~16.75 hours), but leaves
+# less slack than before for the random draw to actually spread posts
+# out further than the minimum. If posts start feeling bunched at the
+# 20-post end of the range, raise this or narrow MAX_POSTS_PER_DAY back
+# down rather than shrinking PEAK_WINDOWS.
 MIN_GAP_MINUTES = 25
-
-# Once a slot's planned timestamp has passed, it is due and gets posted
-# on the very next tick - no waiting on MIN_GAP_MINUTES. The only gap
-# still enforced at that point is this much smaller one, purely to avoid
-# firing two posts in the exact same instant when several slots are
-# overdue at once (e.g. after downtime) and get caught by the same
-# check_once() run.
-CATCHUP_GAP_SECONDS = 150  # 2.5 minutes
 
 # How often the main loop wakes up to check whether it's time to post.
 # Coarse enough to be cheap, fine enough that posts fire within a minute
@@ -101,11 +101,11 @@ POLL_SECONDS = 30
 # bunched at 3am," not minute-perfect optimization.
 PEAK_WINDOWS = [
     # (start_hour, start_min, end_hour, end_min, weight)
-    (7, 0, 9, 30, 3),     # morning commute / breakfast scrolling
-    (12, 0, 14, 0, 2),    # lunch break
-    (17, 0, 19, 0, 3),    # evening commute
-    (19, 0, 22, 30, 5),   # prime time - dinner through late evening, highest weight
-    (22, 30, 23, 45, 1),  # late-night scrollers, light coverage
+    (7, 0, 9, 30, 3),    # morning commute / breakfast scrolling
+    (12, 0, 14, 0, 2),   # lunch break
+    (17, 0, 19, 0, 3),   # evening commute
+    (19, 0, 22, 30, 5),  # prime time - dinner through late evening, highest weight
+    (22, 30, 23, 45, 1), # late-night scrollers, light coverage
 ]
 
 
@@ -115,33 +115,6 @@ def _random_time_in_window(day: date, window) -> datetime:
     end = datetime(day.year, day.month, day.day, eh, em, tzinfo=IST)
     delta_seconds = int((end - start).total_seconds())
     return start + timedelta(seconds=random.randint(0, max(delta_seconds, 0)))
-
-
-def _extra_slots_for_today(day: date, existing_times: list, count: int,
-                            min_gap_minutes: int = MIN_GAP_MINUTES) -> list:
-    """
-    Draws `count` additional peak-window-weighted times for `day`, each at
-    least min_gap_minutes from every time in existing_times AND from the
-    current moment (never schedules a new slot in the past). Used when the
-    app asks for more posts today than are currently planned.
-    """
-    now = now_ist()
-    weights = [w[4] for w in PEAK_WINDOWS]
-    taken = list(existing_times)
-    added = []
-    max_tries = max(count * 300, 300)
-    tries = 0
-    while len(added) < count and tries < max_tries:
-        tries += 1
-        window = random.choices(PEAK_WINDOWS, weights=weights, k=1)[0]
-        candidate = _random_time_in_window(day, window)
-        if candidate <= now:
-            continue
-        if all(abs((candidate - t).total_seconds()) >= min_gap_minutes * 60 for t in taken):
-            taken.append(candidate)
-            added.append(candidate)
-    added.sort()
-    return added
 
 
 def generate_daily_schedule(day: date = None, min_posts: int = MIN_POSTS_PER_DAY,
@@ -154,9 +127,7 @@ def generate_daily_schedule(day: date = None, min_posts: int = MIN_POSTS_PER_DAY
     """
     day = day or today_ist()
     num_posts = random.randint(min_posts, max_posts)
-
     weights = [w[4] for w in PEAK_WINDOWS]
-
     times = []
     max_tries_total = num_posts * 200  # generous ceiling so we never spin forever
     tries = 0
@@ -166,7 +137,6 @@ def generate_daily_schedule(day: date = None, min_posts: int = MIN_POSTS_PER_DAY
         candidate = _random_time_in_window(day, window)
         if all(abs((candidate - t).total_seconds()) >= min_gap_minutes * 60 for t in times):
             times.append(candidate)
-
     times.sort()
     return times
 
@@ -237,135 +207,6 @@ def _publish_schedule_skeleton(today_str: str, planned: list):
     })
 
 
-def _resort_state_by_time(state: dict):
-    """
-    Re-sorts every parallel array in `state` (planned_times/posted/
-    notified/failed) into ascending time order and reassigns indices to
-    match that order.
-
-    Without this, growing the schedule (see _apply_schedule_overrides)
-    would simply append the new times to the end of the lists - even
-    though a freshly-drawn time can easily land *earlier* than an
-    already-pending slot (they're both just random draws inside the same
-    PEAK_WINDOWS). Since the PWA displays/sorts slots by their `index`,
-    those newly-added-but-earlier posts would show up at the bottom of
-    the list instead of where they actually belong in the day's running
-    order. Sorting here keeps index == chronological order, which is the
-    invariant the rest of the pipeline (and the app) assumes.
-
-    Safe to call any time state's lists change shape; it's a no-op if
-    everything is already in time order.
-    """
-    rows = list(zip(
-        state["planned_times"], state["posted"], state["notified"], state["failed"],
-    ))
-    rows.sort(key=lambda r: r[0])  # ISO 8601 strings sort chronologically as strings
-    state["planned_times"] = [r[0] for r in rows]
-    state["posted"] = [r[1] for r in rows]
-    state["notified"] = [r[2] for r in rows]
-    state["failed"] = [r[3] for r in rows]
-
-
-def _resync_daily_slots_skeleton(state: dict):
-    """
-    Rewrites app_state[SLOTS_KEY] to match state['planned_times'] after an
-    override adds/removes/moves slots, WITHOUT losing any content that
-    content_pregen.py already built for a slot that still exists.
-
-    Matches prior slots to new slots by their planned_time value (not by
-    index) - state's arrays may have just been re-sorted by
-    _resort_state_by_time, so a slot's position can shift even when its
-    own timestamp hasn't changed. Matching on the timestamp itself keeps
-    already-built content attached to the correct time instead of
-    silently jumping to whatever slot now happens to sit at the old
-    index. Slots with a changed/removed timestamp simply get a fresh
-    empty skeleton entry, same as _publish_schedule_skeleton does at
-    midnight.
-    """
-    today_str = state["date"]
-    slots_state = get_state(SLOTS_KEY, default={})
-    existing_by_time = {}
-    if slots_state.get("date") == today_str:
-        existing_by_time = {s["planned_time"]: s for s in slots_state.get("slots", [])}
-
-    new_slots = []
-    for i, iso_time in enumerate(state["planned_times"]):
-        prior = existing_by_time.get(iso_time)
-        if prior and prior.get("image_urls"):
-            prior["index"] = i  # position may have shifted after a resort - refresh it
-            new_slots.append(prior)
-        else:
-            new_slots.append({"index": i, "planned_time": iso_time, "image_urls": [], "caption": "", "stories": []})
-
-    save_state(SLOTS_KEY, {"date": today_str, "slots": new_slots})
-
-
-def _apply_schedule_overrides(state: dict) -> dict:
-    """
-    Applies whatever the PWA has requested for today via the
-    schedule_overrides table (posts-per-day count, and/or specific times
-    for individual not-yet-posted slots). Safe to call every tick: it's a
-    no-op once state already matches the request. Already-posted slots are
-    never touched - editing an index that's already fired is ignored.
-    """
-    override = get_schedule_override(state["date"])
-    if not override:
-        return state
-
-    changed = False
-    day = today_ist()
-
-    # --- per-slot time edits: {"3": "14:30", ...} maps index -> IST HH:MM ---
-    for idx_str, hhmm in (override.get("time_edits") or {}).items():
-        try:
-            idx = int(idx_str)
-            h, m = (int(part) for part in hhmm.split(":"))
-        except (ValueError, AttributeError):
-            continue
-        if idx < 0 or idx >= len(state["planned_times"]) or state["posted"][idx]:
-            continue  # can't move a slot that's already posted, or that doesn't exist
-        new_iso = datetime(day.year, day.month, day.day, h, m, tzinfo=IST).isoformat()
-        if state["planned_times"][idx] != new_iso:
-            state["planned_times"][idx] = new_iso
-            changed = True
-
-    # --- total count for today: grow or shrink the trailing not-yet-posted slots ---
-    target = override.get("target_count")
-    if target is not None:
-        target = max(1, min(int(target), MAX_ALLOWED_POSTS_PER_DAY))
-        posted_count = sum(state["posted"])
-        pending_indices = [i for i, posted in enumerate(state["posted"]) if not posted]
-        desired_pending = max(0, target - posted_count)
-
-        if desired_pending > len(pending_indices):
-            existing_times = [datetime.fromisoformat(t) for t in state["planned_times"]]
-            new_times = _extra_slots_for_today(day, existing_times, desired_pending - len(pending_indices))
-            for t in new_times:
-                state["planned_times"].append(t.isoformat())
-                state["posted"].append(False)
-                state["notified"].append(False)
-                state["failed"].append(False)
-            changed = True
-        elif desired_pending < len(pending_indices):
-            # Trim from the latest-planned pending slots first, so anything
-            # sooner (and anything already posted) is left untouched.
-            to_remove = sorted(pending_indices, key=lambda i: state["planned_times"][i])[desired_pending:]
-            for i in sorted(to_remove, reverse=True):
-                del state["planned_times"][i]
-                del state["posted"][i]
-                del state["notified"][i]
-                del state["failed"][i]
-            changed = True
-
-    if changed:
-        _resort_state_by_time(state)  # keep index order == time order (see docstring)
-        _save_state_remote(state)
-        _resync_daily_slots_skeleton(state)
-        print(f"[{now_ist().isoformat()}] Applied schedule override from the app: "
-              f"{len(state['planned_times'])} total slot(s) today.")
-    return state
-
-
 def _ensure_today_schedule_remote(state: dict) -> dict:
     today_str = today_ist().isoformat()
     if state.get("date") != today_str:
@@ -375,7 +216,6 @@ def _ensure_today_schedule_remote(state: dict) -> dict:
             "planned_times": [t.isoformat() for t in planned],
             "posted": [False] * len(planned),
             "notified": [False] * len(planned),
-            "failed": [False] * len(planned),
             "schedule_announced": False,  # flips True once send_notifications.py has pushed the "schedule's ready" alert
         }
         _save_state_remote(state)
@@ -391,12 +231,9 @@ def _ensure_today_schedule_remote(state: dict) -> dict:
         if "schedule_announced" not in state:
             state["schedule_announced"] = False
             changed = True
-        if "failed" not in state:
-            state["failed"] = [False] * len(state["planned_times"])
-            changed = True
         if changed:
             _save_state_remote(state)
-    return _apply_schedule_overrides(state)
+    return state
 
 
 def _get_prebuilt_slot(due_index: int):
@@ -417,81 +254,36 @@ def _get_prebuilt_slot(due_index: int):
     return None
 
 
-def _publish_prebuilt_slot(slot: dict) -> bool:
+def _publish_prebuilt_slot(slot: dict):
     """Publishes a slot's already-built content (images already uploaded,
     stories already reserved in Supabase by content_pregen.py) instead of
     building anything fresh. Reuses the same 'verify against the real IG
-    feed if the API call errors' safety net as hourly_run.run_combined.
-
-    Returns True if the post is confirmed live (API call succeeded, or a
-    feed check confirmed it went live despite an API error), False if it
-    genuinely did not post."""
+    feed if the API call errors' safety net as hourly_run.run_combined."""
     from instagram_publish import (
         post_carousel_to_instagram, post_to_instagram, find_recent_matching_post,
     )
+
     image_urls = slot["image_urls"]
     caption = slot["caption"]
     print(f"  -> publishing pre-built content ({len(slot.get('stories', []))} stories, "
           f"{len(image_urls)} images)...")
     try:
         if len(image_urls) >= 2:
-            media_id = post_carousel_to_instagram(image_urls, caption, account="en")
+            media_id = post_carousel_to_instagram(image_urls, caption)
         else:
-            media_id = post_to_instagram(image_urls[0], caption, account="en")
+            media_id = post_to_instagram(image_urls[0], caption)
         print(f"  -> posted. Media ID: {media_id}")
-        en_ok = True
     except Exception as e:
         print(f"  -> Instagram publish failed: {e}")
         print("  -> checking the account's recent media in case it actually posted "
               "despite the error...")
-        media_id = find_recent_matching_post(caption, account="en")
+        media_id = find_recent_matching_post(caption)
         if media_id:
             print(f"  -> confirmed: post {media_id} actually went live despite the error.")
-            en_ok = True
         else:
             print("  -> confirmed: it genuinely did not post. The stories in this slot "
                   "were already reserved at pre-generation time, so they won't be "
                   "retried automatically - check the app/logs and post manually if needed.")
-            en_ok = False
-
-    # Hindi sister-page content, pre-built alongside English by
-    # content_pregen.py (see run_combined's POST_HINDI path). Published
-    # independently - a Hindi failure here never flips en_ok back to
-    # False, since the English post's outcome is already decided above.
-    image_urls_hi = slot.get("image_urls_hi") or []
-    caption_hi = slot.get("caption_hi") or ""
-    if image_urls_hi:
-        print(f"  -> [hi] publishing pre-built Hindi content ({len(image_urls_hi)} images)...")
-        try:
-            if len(image_urls_hi) >= 2:
-                media_id_hi = post_carousel_to_instagram(image_urls_hi, caption_hi, account="hi")
-            else:
-                media_id_hi = post_to_instagram(image_urls_hi[0], caption_hi, account="hi")
-            print(f"  -> [hi] posted. Media ID: {media_id_hi}")
-        except Exception as e:
-            print(f"  -> [hi] Instagram publish failed: {e}")
-            media_id_hi = find_recent_matching_post(caption_hi, account="hi")
-            if media_id_hi:
-                print(f"  -> [hi] confirmed: post {media_id_hi} actually went live despite the error.")
-            else:
-                print("  -> [hi] confirmed: it genuinely did not post this slot - "
-                      "only affects the Hindi page, English is unaffected.")
-
-    return en_ok
-
-
-def _push_slot_status_remote(index: int, success: bool):
-    """Writes the real posted/failed outcome onto the app-visible
-    daily_slots state so the companion PWA shows a genuine failure
-    instead of a clock-based 'done' guess."""
-    slots_state = get_state(SLOTS_KEY, default={})
-    if slots_state.get("date") != today_ist().isoformat():
-        return
-    for slot in slots_state.get("slots", []):
-        if slot.get("index") == index:
-            slot["posted"] = success
-            slot["failed"] = not success
-    save_state(SLOTS_KEY, slots_state)
 
 
 def _check_manual_slot(state: dict, index: int):
@@ -505,6 +297,7 @@ def _check_manual_slot(state: dict, index: int):
     slot = _get_prebuilt_slot(index)
     if not slot or not slot.get("caption"):
         return  # content for this slot hasn't been built yet - nothing to match against
+
     media_id = find_recent_matching_post(slot["caption"])
     if media_id:
         print(f"  -> slot #{index + 1} is flagged Manual and a matching post "
@@ -527,14 +320,10 @@ def check_once():
     All "today"/"now" here means IST, regardless of the server's own
     clock.
 
-    Fires EVERY overdue, not-yet-posted, non-Manual slot found in one
-    pass, in timestamp order - a due post is the first priority and is
-    never held back to preserve spacing. The only gap still enforced
-    between posts is CATCHUP_GAP_SECONDS (2.5 min), just so a pile of
-    simultaneously-overdue slots (e.g. after downtime) don't fire in the
-    same instant; it never delays a single overdue post waiting on its
-    own. Safe to call as often as you like; it's a no-op if nothing is
-    currently due.
+    Fires AT MOST ONE post per invocation - the single earliest overdue,
+    not-yet-posted slot that also clears MIN_GAP_MINUTES since the last
+    post - then exits. Safe to call as often as you like; it's a no-op
+    if nothing is currently due.
 
     If content_pregen.py already built this slot's carousel earlier
     (the companion app's rolling "content ready ~30 min ahead" feature),
@@ -550,13 +339,11 @@ def check_once():
     """
     state = _load_state_remote()
     state = _ensure_today_schedule_remote(state)
+
     now = now_ist()
     manual_indices = get_manual_slot_indices(state["date"])
 
-    # Collect every overdue, not-yet-posted slot up front, in timestamp
-    # order. Manual slots are checked against the real feed inline (as
-    # before) and never enter this list.
-    due_indices = []
+    due_index = None
     for i, iso_time in enumerate(state["planned_times"]):
         if state["posted"][i]:
             continue
@@ -565,102 +352,75 @@ def check_once():
         if i in manual_indices:
             _check_manual_slot(state, i)
             continue  # never auto-post a manual slot - just check if you posted it yourself
-        due_indices.append(i)
+        due_index = i
+        break
 
-    if not due_indices:
+    if due_index is None:
         print(f"[{now.isoformat()}] Nothing due for auto-posting right now. "
               f"{sum(state['posted'])}/{len(state['posted'])} posted today.")
         return
 
-    print(f"[{now.isoformat()}] {len(due_indices)} slot(s) overdue - "
-          f"posting all of them now, in order.")
+    last_post_iso = state.get("last_post_time")
+    last_post_dt = datetime.fromisoformat(last_post_iso) if last_post_iso else None
+    gap_ok = last_post_dt is None or (now - last_post_dt).total_seconds() >= MIN_GAP_MINUTES * 60
 
-    if "failed" not in state:
-        state["failed"] = [False] * len(state["planned_times"])
+    if not gap_ok:
+        print(f"[{now.isoformat()}] Slot #{due_index + 1} is overdue but the "
+              f"minimum gap since the last post hasn't elapsed yet - waiting for a later run.")
+        return
 
-    for due_index in due_indices:
-        # CATCHUP_GAP_SECONDS only protects against firing two posts in
-        # the same instant when a batch of slots is overdue together; it
-        # never holds a post back to preserve normal-day spacing (that's
-        # MIN_GAP_MINUTES's job, applied only when the schedule is first
-        # generated). If the gap hasn't cleared yet, just wait a beat and
-        # re-check rather than skipping the slot to a later run.
-        last_post_iso = state.get("last_post_time")
-        if last_post_iso:
-            elapsed = (now_ist() - datetime.fromisoformat(last_post_iso)).total_seconds()
-            if elapsed < CATCHUP_GAP_SECONDS:
-                time.sleep(CATCHUP_GAP_SECONDS - elapsed)
+    planned_dt = datetime.fromisoformat(state["planned_times"][due_index])
+    print(f"[{now.isoformat()}] Firing scheduled post "
+          f"#{due_index + 1}/{len(state['planned_times'])} "
+          f"(planned {planned_dt.strftime('%H:%M')} IST)")
 
-        planned_dt = datetime.fromisoformat(state["planned_times"][due_index])
-        print(f"[{now_ist().isoformat()}] Firing scheduled post "
-              f"#{due_index + 1}/{len(state['planned_times'])} "
-              f"(planned {planned_dt.strftime('%H:%M')} IST)")
-        success = False
-        try:
-            prebuilt = _get_prebuilt_slot(due_index)
-            if prebuilt:
-                success = _publish_prebuilt_slot(prebuilt)
-            else:
-                print("  -> no pre-built content found for this slot - building fresh now.")
-                hourly_run.run_combined(
-                    story_count=STORIES_PER_POST,
-                    images_per_story=IMAGES_PER_STORY,
-                    apply_jitter=False,
-                )
-                success = True
-        except Exception:
-            print("Post attempt failed - will not retry this slot, "
-                  "continuing with the rest of today's schedule.")
-            traceback.print_exc()
-            success = False
+    try:
+        prebuilt = _get_prebuilt_slot(due_index)
+        if prebuilt:
+            _publish_prebuilt_slot(prebuilt)
+        else:
+            print("  -> no pre-built content found for this slot - building fresh now.")
+            # Timing/randomness is already handled by the schedule itself,
+            # so skip hourly_run's own extra jitter delay.
+            hourly_run.run_combined(
+                story_count=STORIES_PER_POST,
+                images_per_story=IMAGES_PER_STORY,
+                apply_jitter=False,
+            )
+    except Exception:
+        print("Post attempt failed - will not retry this slot, "
+              "continuing with the rest of today's schedule.")
+        traceback.print_exc()
 
-        # Defensive pad: state["posted"]/["failed"] should always be kept in
-        # sync with state["planned_times"] by _apply_schedule_overrides(),
-        # but if they're ever short for any reason, extend rather than
-        # IndexError here - a crash on this line, after a real Instagram
-        # publish already succeeded, is exactly what caused slots to get
-        # re-posted on the next tick (the "posted" flag never made it to
-        # Supabase because the crash happened before _save_state_remote).
-        while len(state["posted"]) <= due_index:
-            state["posted"].append(False)
-        while len(state["failed"]) <= due_index:
-            state["failed"].append(False)
-
-        try:
-            state["posted"][due_index] = True
-            state["failed"][due_index] = not success
-            if success:
-                state["last_post_time"] = now_ist().isoformat()
-        finally:
-            # Always persist, even if something above this line misbehaves -
-            # a real publish must never be lost from state.
-            _save_state_remote(state)  # save after each slot - a mid-run interruption loses nothing
-        _push_slot_status_remote(due_index, success)
+    state["posted"][due_index] = True
+    state["last_post_time"] = now_ist().isoformat()
+    _save_state_remote(state)
 
 
 def run_forever():
     state = _load_state()
     state = _ensure_today_schedule(state)
+
     print(f"[{datetime.now().isoformat()}] Scheduler is running. Checking every "
           f"{POLL_SECONDS}s for a due post. Leave this running; it prints again "
           f"when it actually fires a post, and every ~30 minutes as a heartbeat "
           f"so you know it's still alive.")
+
     last_heartbeat = time.time()
     HEARTBEAT_SECONDS = 1800
 
     while True:
         if state.get("date") != date.today().isoformat():
             state = _ensure_today_schedule(state)  # only re-plans on an actual day rollover
+
         now = datetime.now()
 
-        # Fires the single earliest overdue, not-yet-posted slot per pass
-        # - the 30s poll loop means the NEXT overdue slot (if any) gets
-        # picked up moments later anyway, so this never sits on a backlog.
-        # The only gap enforced here is CATCHUP_GAP_SECONDS, purely so two
-        # simultaneously-overdue slots don't fire in the very same
-        # instant - it never holds a single overdue post back waiting on
-        # MIN_GAP_MINUTES (that constant only shapes spacing when a day's
-        # schedule is first generated, not when a post is already due).
+        # Only ever fire the SINGLE earliest overdue, not-yet-posted slot
+        # per pass - not every overdue slot in one go. If the process
+        # started late (or is catching up after being stopped for a
+        # while), there may be several slots simultaneously "due"; firing
+        # them all back-to-back would blow through MIN_GAP_MINUTES, which
+        # is exactly what was happening before this fix.
         due_index = None
         for i, iso_time in enumerate(state["planned_times"]):
             if state["posted"][i]:
@@ -672,7 +432,7 @@ def run_forever():
         if due_index is not None:
             last_post_iso = state.get("last_post_time")
             last_post_dt = datetime.fromisoformat(last_post_iso) if last_post_iso else None
-            gap_ok = last_post_dt is None or (now - last_post_dt).total_seconds() >= CATCHUP_GAP_SECONDS
+            gap_ok = last_post_dt is None or (now - last_post_dt).total_seconds() >= MIN_GAP_MINUTES * 60
 
             if gap_ok:
                 planned_dt = datetime.fromisoformat(state["planned_times"][due_index])
@@ -691,6 +451,7 @@ def run_forever():
                     print("Post attempt failed - will not retry this slot, "
                           "continuing with the rest of today's schedule.")
                     traceback.print_exc()
+
                 state["posted"][due_index] = True
                 state["last_post_time"] = datetime.now().isoformat()
                 _save_state(state)
