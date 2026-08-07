@@ -3,6 +3,13 @@ instagram_publish.py
 Posts an image + caption directly to Instagram via the Graph API.
 This is a two-step flow: create a media container pointing at a public
 image URL, wait for Instagram to finish processing it, then publish it.
+
+Multi-account: this file now drives TWO Instagram professional accounts
+from one process - the English page ("en") and the Hindi page ("hi").
+Every function takes an `account` kwarg (defaults to "en" so existing
+callers that don't pass it keep working unchanged). Add a third
+language/page later by adding one entry to ACCOUNTS below - nothing
+else in this file needs to change.
 """
 import os
 import time
@@ -14,15 +21,39 @@ load_dotenv()  # harmless no-op if already loaded by the entry script (e.g. hour
 GRAPH_API_VERSION = "v21.0"
 GRAPH_BASE = f"https://graph.instagram.com/{GRAPH_API_VERSION}"
 
-IG_USER_ID = os.environ.get("IG_USER_ID")
-def _access_token():
-    """Read fresh each call - ensure_token_fresh() may have updated this env var after module import (e.g. after a Supabase-tracked token refresh)."""
-    return os.environ.get("IG_ACCESS_TOKEN")
+# Maps a short account key to the env var names holding that account's
+# IG user id / access token. token_refresh.py writes refreshed tokens
+# back into these same env vars at runtime (see ensure_token_fresh),
+# so always read them fresh via os.environ.get() rather than caching.
+ACCOUNTS = {
+    "en": {"user_id_env": "IG_USER_ID", "token_env": "IG_ACCESS_TOKEN"},
+    "hi": {"user_id_env": "IG_USER_ID_HI", "token_env": "IG_ACCESS_TOKEN_HI"},
+}
 
 
-def _check_env():
-    if not IG_USER_ID or not _access_token():
-        raise RuntimeError("IG_USER_ID / IG_ACCESS_TOKEN not set in environment")
+def _user_id(account: str) -> str:
+    return os.environ.get(ACCOUNTS[account]["user_id_env"])
+
+
+def _access_token(account: str) -> str:
+    """Read fresh each call - ensure_token_fresh() may have updated this
+    env var after module import (e.g. after a Supabase-tracked token
+    refresh for that specific account)."""
+    return os.environ.get(ACCOUNTS[account]["token_env"])
+
+
+def _check_env(account: str):
+    if account not in ACCOUNTS:
+        raise RuntimeError(
+            f"Unknown IG account '{account}' - valid keys are {list(ACCOUNTS)}. "
+            f"Add a new entry to ACCOUNTS in instagram_publish.py for a new page/language."
+        )
+    if not _user_id(account) or not _access_token(account):
+        cfg = ACCOUNTS[account]
+        raise RuntimeError(
+            f"{cfg['user_id_env']} / {cfg['token_env']} not set in environment "
+            f"(account='{account}')"
+        )
 
 
 def _raise_with_detail(resp: requests.Response):
@@ -47,25 +78,25 @@ def _raise_with_detail(resp: requests.Response):
     )
 
 
-def create_media_container(image_url: str, caption: str) -> str:
-    _check_env()
+def create_media_container(image_url: str, caption: str, account: str = "en") -> str:
+    _check_env(account)
     resp = requests.post(
-        f"{GRAPH_BASE}/{IG_USER_ID}/media",
-        data={"image_url": image_url, "caption": caption, "access_token": _access_token()},
+        f"{GRAPH_BASE}/{_user_id(account)}/media",
+        data={"image_url": image_url, "caption": caption, "access_token": _access_token(account)},
         timeout=30,
     )
     _raise_with_detail(resp)
     return resp.json()["id"]
 
 
-def wait_for_container_ready(container_id: str, timeout: int = 90, poll_interval: int = 3) -> bool:
+def wait_for_container_ready(container_id: str, account: str = "en", timeout: int = 90, poll_interval: int = 3) -> bool:
     """Instagram processes the image async - poll status_code until FINISHED."""
-    _check_env()
+    _check_env(account)
     elapsed = 0
     while elapsed < timeout:
         resp = requests.get(
             f"{GRAPH_BASE}/{container_id}",
-            params={"fields": "status_code", "access_token": _access_token()},
+            params={"fields": "status_code", "access_token": _access_token(account)},
             timeout=15,
         )
         _raise_with_detail(resp)
@@ -79,23 +110,23 @@ def wait_for_container_ready(container_id: str, timeout: int = 90, poll_interval
     return False
 
 
-def publish_container(container_id: str) -> str:
-    _check_env()
+def publish_container(container_id: str, account: str = "en") -> str:
+    _check_env(account)
     resp = requests.post(
-        f"{GRAPH_BASE}/{IG_USER_ID}/media_publish",
-        data={"creation_id": container_id, "access_token": _access_token()},
+        f"{GRAPH_BASE}/{_user_id(account)}/media_publish",
+        data={"creation_id": container_id, "access_token": _access_token(account)},
         timeout=30,
     )
     _raise_with_detail(resp)
     return resp.json()["id"]
 
 
-def post_to_instagram(image_url: str, caption: str) -> str:
+def post_to_instagram(image_url: str, caption: str, account: str = "en") -> str:
     """Full flow: create container -> wait until ready -> publish. Returns the published media ID."""
-    container_id = create_media_container(image_url, caption)
-    if not wait_for_container_ready(container_id):
-        raise RuntimeError(f"Media container {container_id} failed to process in time")
-    return publish_container(container_id)
+    container_id = create_media_container(image_url, caption, account=account)
+    if not wait_for_container_ready(container_id, account=account):
+        raise RuntimeError(f"Media container {container_id} failed to process in time (account={account})")
+    return publish_container(container_id, account=account)
 
 
 def _is_transient_media_fetch_error(exc: requests.HTTPError) -> bool:
@@ -115,7 +146,7 @@ def _is_transient_media_fetch_error(exc: requests.HTTPError) -> bool:
         return False
 
 
-def create_carousel_item_container(image_url: str, max_retries: int = 3) -> str:
+def create_carousel_item_container(image_url: str, account: str = "en", max_retries: int = 3) -> str:
     """
     Create one child item of a carousel. Same idea as create_media_container,
     but marked is_carousel_item and - per the Graph API - must NOT include
@@ -126,14 +157,14 @@ def create_carousel_item_container(image_url: str, max_retries: int = 3) -> str:
     propagation race, not a real problem with the file - everything else
     still fails immediately.
     """
-    _check_env()
+    _check_env(account)
     for attempt in range(1, max_retries + 1):
         resp = requests.post(
-            f"{GRAPH_BASE}/{IG_USER_ID}/media",
+            f"{GRAPH_BASE}/{_user_id(account)}/media",
             data={
                 "image_url": image_url,
                 "is_carousel_item": "true",
-                "access_token": _access_token(),
+                "access_token": _access_token(account),
             },
             timeout=30,
         )
@@ -143,7 +174,7 @@ def create_carousel_item_container(image_url: str, max_retries: int = 3) -> str:
         except requests.HTTPError as e:
             if attempt < max_retries and _is_transient_media_fetch_error(e):
                 wait = 5 * attempt  # 5s, 10s, ...
-                print(f"[instagram_publish] media fetch failed for {image_url} "
+                print(f"[instagram_publish] media fetch failed for {image_url} (account={account}) "
                       f"(likely CDN propagation lag) - retrying in {wait}s "
                       f"(attempt {attempt}/{max_retries})")
                 time.sleep(wait)
@@ -151,16 +182,16 @@ def create_carousel_item_container(image_url: str, max_retries: int = 3) -> str:
             raise
 
 
-def create_carousel_container(child_container_ids: list, caption: str) -> str:
+def create_carousel_container(child_container_ids: list, caption: str, account: str = "en") -> str:
     """Create the parent CAROUSEL container that references the already-created child items."""
-    _check_env()
+    _check_env(account)
     resp = requests.post(
-        f"{GRAPH_BASE}/{IG_USER_ID}/media",
+        f"{GRAPH_BASE}/{_user_id(account)}/media",
         data={
             "media_type": "CAROUSEL",
             "children": ",".join(child_container_ids),
             "caption": caption,
-            "access_token": _access_token(),
+            "access_token": _access_token(account),
         },
         timeout=30,
     )
@@ -168,7 +199,7 @@ def create_carousel_container(child_container_ids: list, caption: str) -> str:
     return resp.json()["id"]
 
 
-def post_carousel_to_instagram(image_urls: list, caption: str) -> str:
+def post_carousel_to_instagram(image_urls: list, caption: str, account: str = "en") -> str:
     """
     Full carousel flow: create + wait-for-ready on each child item image
     (2-10 images per Instagram's limit), then create the parent carousel
@@ -180,18 +211,18 @@ def post_carousel_to_instagram(image_urls: list, caption: str) -> str:
 
     child_ids = []
     for image_url in image_urls:
-        child_id = create_carousel_item_container(image_url)
-        if not wait_for_container_ready(child_id):
-            raise RuntimeError(f"Carousel item container {child_id} failed to process in time")
+        child_id = create_carousel_item_container(image_url, account=account)
+        if not wait_for_container_ready(child_id, account=account):
+            raise RuntimeError(f"Carousel item container {child_id} failed to process in time (account={account})")
         child_ids.append(child_id)
 
-    carousel_id = create_carousel_container(child_ids, caption)
-    if not wait_for_container_ready(carousel_id):
-        raise RuntimeError(f"Carousel container {carousel_id} failed to process in time")
-    return publish_container(carousel_id)
+    carousel_id = create_carousel_container(child_ids, caption, account=account)
+    if not wait_for_container_ready(carousel_id, account=account):
+        raise RuntimeError(f"Carousel container {carousel_id} failed to process in time (account={account})")
+    return publish_container(carousel_id, account=account)
 
 
-def find_recent_matching_post(caption: str, lookback_seconds: int = 600, caption_prefix_len: int = 60) -> str | None:
+def find_recent_matching_post(caption: str, account: str = "en", lookback_seconds: int = 600, caption_prefix_len: int = 60) -> str | None:
     """
     Meta's Graph API occasionally returns an error (e.g. the "action is
     blocked" / "Application request limit reached" spam-review response)
@@ -212,17 +243,17 @@ def find_recent_matching_post(caption: str, lookback_seconds: int = 600, caption
     """
     try:
         resp = requests.get(
-            f"{GRAPH_BASE}/{IG_USER_ID}/media",
+            f"{GRAPH_BASE}/{_user_id(account)}/media",
             params={
                 "fields": "id,caption,timestamp",
                 "limit": 10,
-                "access_token": _access_token(),
+                "access_token": _access_token(account),
             },
             timeout=15,
         )
         _raise_with_detail(resp)
     except requests.RequestException as e:
-        print(f"[instagram_publish] couldn't verify recent posts ({e}) - "
+        print(f"[instagram_publish] couldn't verify recent posts for account={account} ({e}) - "
               f"treating the publish as failed")
         return None
 
@@ -246,5 +277,6 @@ def find_recent_matching_post(caption: str, lookback_seconds: int = 600, caption
 
 
 if __name__ == "__main__":
-    print("Set IG_USER_ID and IG_ACCESS_TOKEN, then call post_to_instagram(image_url, caption)")
-    print("or post_carousel_to_instagram([image_url, ...], caption) for a multi-slide post.")
+    print("Set IG_USER_ID / IG_ACCESS_TOKEN (English page) and IG_USER_ID_HI / IG_ACCESS_TOKEN_HI "
+          "(Hindi page), then call post_to_instagram(image_url, caption, account='en'|'hi')")
+    print("or post_carousel_to_instagram([image_url, ...], caption, account='en'|'hi') for a multi-slide post.")
