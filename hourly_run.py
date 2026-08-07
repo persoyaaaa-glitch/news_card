@@ -82,6 +82,25 @@ def _next_theme() -> dict:
 
     return theme
 
+
+# Same rotation pattern as _next_theme() above, but for card_generator_hindi's
+# two font families ("kalam", "eczar") - persisted via Supabase (app_state key
+# "hindi_font_rotation") so consecutive Hindi posts strictly alternate
+# fonts instead of repeating one by chance.
+def _next_font_family() -> str:
+    choices = card_generator_hindi.FONT_FAMILY_CHOICES
+    state = get_state("hindi_font_rotation", default={"next_index": 0})
+    idx = state.get("next_index", 0) % len(choices)
+    family = choices[idx]
+
+    try:
+        save_state("hindi_font_rotation", {"next_index": (idx + 1) % len(choices)})
+    except Exception as e:
+        print(f"[hourly_run] warning: couldn't persist Hindi font rotation state ({e}) - "
+              f"rotation may repeat a font on the next run")
+
+    return family
+
 # Fraction of posts that use a generated abstract background instead of
 # the source article's photo. Set to 0 to always use the real photo -
 # we only ever want to post stories whose real image could be fetched,
@@ -377,6 +396,7 @@ def _build_hindi_slides(result: dict, theme: dict, out_dir: str = CARD_DIR, tmp_
         breaking=result.get("is_breaking", False),
         theme=theme,
         grayscale=sensitive,
+        font_family=_next_font_family(),
     )
 
     return {"slide_paths": slide_paths_hi, "headline_hi": headline_hi, "detail_hi": detail_hi}
