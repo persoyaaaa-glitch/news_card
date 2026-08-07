@@ -177,7 +177,7 @@ function render(data, manualIndices) {
         <div class="slot-time">${fmtTime(planned)}${isManual ? ' <span class="manual-tag">MANUAL</span>' : ""}</div>
         <div class="slot-headline">${topStory ? escapeHtml(topStory.title) : "Pending"}</div>
       </div>
-      <span class="slot-meta">${(slot.stories || []).length}&middot;${(slot.image_urls || []).length}</span>
+      <span class="slot-meta">${(slot.stories || []).length}&middot;${(slot.image_urls || []).length}${(slot.image_urls_hi || []).length ? ' <span class="hi-badge">HI</span>' : ""}</span>
     `;
     row.addEventListener("click", () => openModal(slot));
     list.appendChild(row);
@@ -201,23 +201,25 @@ function tickClock() {
 
 // ---- Modal ----
 
+let currentModalSlot = null;
+let currentModalLang = "en";
+
 function openModal(slot) {
+  currentModalSlot = slot;
+  currentModalLang = "en";
   const modal = document.getElementById("modal");
   const planned = new Date(slot.planned_time);
   document.getElementById("modalTime").textContent = fmtTime(planned) + " IST";
   document.getElementById("modalSub").textContent =
     `${(slot.stories || []).length} stories · ${(slot.image_urls || []).length} slides`;
 
-  const scroller = document.getElementById("slidesScroller");
-  scroller.innerHTML = "";
-  (slot.image_urls || []).forEach((url) => {
-    const img = document.createElement("img");
-    img.src = url;
-    img.loading = "lazy";
-    scroller.appendChild(img);
-  });
+  const hasHindi = (slot.image_urls_hi || []).length > 0;
+  const langTabs = document.getElementById("langTabs");
+  langTabs.hidden = !hasHindi;
+  document.getElementById("langTabEn").classList.add("active");
+  document.getElementById("langTabHi").classList.remove("active");
 
-  document.getElementById("captionText").textContent = slot.caption || "";
+  renderModalLang("en");
 
   const storyList = document.getElementById("storyList");
   storyList.innerHTML = "";
@@ -227,12 +229,6 @@ function openModal(slot) {
     li.textContent = `${s.title} — ${s.source || ""}`;
     storyList.appendChild(li);
   });
-
-  document.getElementById("downloadStatus").textContent = "";
-  document.getElementById("downloadAllBtn").onclick = () => downloadAllSlides(slot);
-  document.getElementById("copyBtn").onclick = () => copyCaption(slot.caption || "");
-  document.getElementById("copyBtn").classList.remove("copied");
-  document.getElementById("copyBtn").textContent = "Copy";
 
   const manualBtn = document.getElementById("manualBtn");
   const manualStatus = document.getElementById("manualStatus");
@@ -264,8 +260,48 @@ function openModal(slot) {
   modal.hidden = false;
 }
 
+// Fills the slides scroller, caption, and download button for whichever
+// language tab is active (slot's English fields have no suffix; Hindi
+// fields are the same shape with an "_hi" suffix - see content_pregen.py /
+// hourly_run.run_combined). Falls back to "no Hindi content" copy if a
+// slot with the tab visible somehow has no Hindi images (e.g. every
+// story in that slot failed translation - see hourly_run._build_hindi_slides).
+function renderModalLang(lang) {
+  currentModalLang = lang;
+  const slot = currentModalSlot;
+  if (!slot) return;
+
+  const imageUrls = lang === "hi" ? (slot.image_urls_hi || []) : (slot.image_urls || []);
+  const caption = lang === "hi" ? (slot.caption_hi || "") : (slot.caption || "");
+
+  const scroller = document.getElementById("slidesScroller");
+  scroller.innerHTML = "";
+  if (!imageUrls.length && lang === "hi") {
+    const p = document.createElement("p");
+    p.className = "field-hint";
+    p.textContent = "Hindi translation didn't come through for this slot's stories - only the English post will go out.";
+    scroller.appendChild(p);
+  } else {
+    imageUrls.forEach((url) => {
+      const img = document.createElement("img");
+      img.src = url;
+      img.loading = "lazy";
+      scroller.appendChild(img);
+    });
+  }
+
+  document.getElementById("captionText").textContent = caption;
+
+  document.getElementById("downloadStatus").textContent = "";
+  document.getElementById("downloadAllBtn").onclick = () => downloadAllSlides(imageUrls, lang);
+  document.getElementById("copyBtn").onclick = () => copyCaption(caption);
+  document.getElementById("copyBtn").classList.remove("copied");
+  document.getElementById("copyBtn").textContent = "Copy";
+}
+
 function closeModal() {
   document.getElementById("modal").hidden = true;
+  currentModalSlot = null;
 }
 
 // ---- Schedule editor modal ----
@@ -376,10 +412,11 @@ async function saveScheduleChanges() {
   }
 }
 
-async function downloadAllSlides(slot) {
+async function downloadAllSlides(imageUrls, lang) {
   const btn = document.getElementById("downloadAllBtn");
   const status = document.getElementById("downloadStatus");
-  const urls = slot.image_urls || [];
+  const urls = imageUrls || [];
+  const prefix = lang === "hi" ? "slide-hi" : "slide";
   btn.disabled = true;
 
   for (let i = 0; i < urls.length; i++) {
@@ -390,7 +427,7 @@ async function downloadAllSlides(slot) {
       const objectUrl = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = objectUrl;
-      a.download = `slide-${String(i + 1).padStart(2, "0")}.jpg`;
+      a.download = `${prefix}-${String(i + 1).padStart(2, "0")}.jpg`;
       document.body.appendChild(a);
       a.click();
       a.remove();
@@ -401,7 +438,7 @@ async function downloadAllSlides(slot) {
       status.textContent = `Slide ${i + 1} failed to download.`;
     }
   }
-  status.textContent = `Saved ${urls.length} slide(s) to your downloads.`;
+  status.textContent = urls.length ? `Saved ${urls.length} slide(s) to your downloads.` : "Nothing to download.";
   btn.disabled = false;
 }
 
@@ -512,6 +549,16 @@ function renderTraffic(traffic) {
 document.getElementById("closeModalBtn").addEventListener("click", closeModal);
 document.getElementById("modal").addEventListener("click", (e) => {
   if (e.target.id === "modal") closeModal();
+});
+document.getElementById("langTabEn").addEventListener("click", () => {
+  document.getElementById("langTabEn").classList.add("active");
+  document.getElementById("langTabHi").classList.remove("active");
+  renderModalLang("en");
+});
+document.getElementById("langTabHi").addEventListener("click", () => {
+  document.getElementById("langTabHi").classList.add("active");
+  document.getElementById("langTabEn").classList.remove("active");
+  renderModalLang("hi");
 });
 document.getElementById("openScheduleBtn").addEventListener("click", openScheduleModal);
 document.getElementById("closeScheduleModalBtn").addEventListener("click", closeScheduleModal);
