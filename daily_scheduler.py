@@ -66,7 +66,7 @@ MAX_POSTS_PER_DAY = 13
 # supabase_app_additions.sql). This is a hard server-side ceiling applied
 # to whatever it requests, so a bad value written there can't blow up the
 # day's posting volume.
-MAX_ALLOWED_POSTS_PER_DAY = 15
+MAX_ALLOWED_POSTS_PER_DAY = 20
 
 # Each "post" now bundles this many distinct stories into ONE combined
 # carousel (see hourly_run.run_combined) instead of one story per post -
