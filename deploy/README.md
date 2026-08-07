@@ -56,7 +56,10 @@ python3 -m venv .venv
 Create `/opt/news_card/.env` on the VM with your actual values (same
 keys as before: SUPABASE_URL, SUPABASE_SERVICE_KEY,
 SUPABASE_STORAGE_BUCKET, IG_USER_ID, IG_ACCESS_TOKEN, GEMINI_API_KEY,
-META_APP_ID, META_APP_SECRET). This file never leaves the VM.
+META_APP_ID, META_APP_SECRET — plus, for the Hindi sister page,
+IG_USER_ID_HI and IG_ACCESS_TOKEN_HI. Set POST_HINDI_PAGE=false to
+pause Hindi posting without touching the English pipeline). This file
+never leaves the VM.
 
 Then run the one-time migration so Supabase has your current token's
 tracked expiry:
