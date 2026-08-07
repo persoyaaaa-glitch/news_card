@@ -109,6 +109,12 @@ def pregenerate_today():
             "planned_time": iso_time,
             "image_urls": result["image_urls"],
             "caption": result["caption"],
+            # Hindi sister-page content, built alongside English by the
+            # same run_combined(publish=False) call above - may be empty
+            # if POST_HINDI is off or every story failed translation
+            # this run (see hourly_run.run_combined).
+            "image_urls_hi": result.get("image_urls_hi", []),
+            "caption_hi": result.get("caption_hi", ""),
             "stories": [
                 {"title": r["title"], "source": r["source"], "is_sensitive": r.get("is_sensitive", False)}
                 for r in result["results"]
