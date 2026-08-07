@@ -1,0 +1,48 @@
+name: Test post (Hindi account only)
+
+# Manual-only - never runs on a schedule. Builds ONE real story,
+# translates it to Hindi, and posts (or previews) it to the Hindi
+# Instagram account ONLY. English credentials are never referenced in
+# this workflow and hourly_run.run_hindi_test() never marks the story
+# as posted, so running this - even with live=true - cannot interfere
+# with the normal automated scheduler.yml pipeline in any way.
+on:
+  workflow_dispatch:
+    inputs:
+      live:
+        description: "Actually publish to the Hindi Instagram account (unchecked = preview only, nothing posted)"
+        required: true
+        type: boolean
+        default: false
+
+jobs:
+  hindi-test-post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run Hindi-only test post
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          IG_USER_ID_HI: ${{ secrets.IG_USER_ID_HI }}
+          IG_ACCESS_TOKEN_HI: ${{ secrets.IG_ACCESS_TOKEN_HI }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          META_APP_ID: ${{ secrets.META_APP_ID }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+        run: |
+          if [ "${{ inputs.live }}" = "true" ]; then
+            yes yes | python test_post.py --hindi --live
+          else
+            python test_post.py --hindi
+          fi
