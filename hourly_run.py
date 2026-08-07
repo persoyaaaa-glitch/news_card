@@ -38,12 +38,20 @@ from news_source import fetch_best_and_breaking_news
 from image_fetch import get_article_image_from_resolved_url, resolve_article_url
 from article_extract import get_carousel_slide_texts, extract_article_paragraphs
 from card_generator import build_carousel, HEADLINE_THEMES
+import card_generator_hindi
 from supabase_client import is_duplicate_story, get_recent_titles, mark_as_posted, upload_carousel_images, get_state, save_state
 from instagram_publish import post_carousel_to_instagram, post_to_instagram, find_recent_matching_post
 from ai_text import (
     generate_hook_and_detail, generate_caption_and_hashtags,
     format_instagram_caption, generate_digest_caption_and_hashtags,
+    translate_story_to_hindi, translate_text_to_hindi, translate_caption_to_hindi,
 )
+
+# Master switch for the Hindi sister page. Set POST_HINDI_PAGE=false in
+# the environment to pause Hindi posting entirely (e.g. while its token
+# is being re-set-up) without touching the English pipeline at all -
+# every Hindi code path below checks this first and no-ops if it's off.
+POST_HINDI = os.environ.get("POST_HINDI_PAGE", "true").strip().lower() == "true"
 
 TMP_DIR = "tmp_images"
 CARD_DIR = "output"
@@ -295,12 +303,83 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
         "slide_paths": slide_paths,
         "caption": caption,
         "detail_text": detail_text,
+        "slide_texts": slide_texts,  # raw list backing slide_paths[1:] - kept for the Hindi translation pass (_build_hindi_slides)
         # Diagnostics, for QA/trial runs to audit at a glance:
         "used_real_image": used_real_image,
         "used_generated_background": img_path is None,
         "had_article_text": bool(raw_article_text),
         "has_description_slide": len(slide_paths) > 1,
     }
+
+
+def _build_hindi_slides(result: dict, theme: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR) -> dict | None:
+    """
+    Given an already-built English `result` dict (see _build_post),
+    translates its headline + body text into Hindi and renders the SAME
+    story as a Hindi-language carousel via card_generator_hindi, reusing
+    the same photo, tag, theme, breaking flag, and grayscale/sensitive
+    treatment as the English version - only the text differs.
+
+    Returns a dict {"slide_paths": [...], "headline_hi": str,
+    "detail_hi": str or None} or None if translation failed (e.g.
+    Gemini quota exhausted) - callers should just skip the Hindi post
+    for that story in that case, never post an untranslated card.
+    """
+    title = result["title"]
+    tag = result["tag"]
+    source = result["source"]
+    sensitive = result.get("is_sensitive", False)
+    # The first English slide is always the hook card (build_carousel's
+    # convention); recover the same source photo path from tmp_dir using
+    # the same slug _build_post used, so the Hindi hook/info slides crop
+    # the identical photo instead of re-fetching or mismatching it.
+    img_path = os.path.join(tmp_dir, f"{slugify(title)}.png")
+    if not os.path.exists(img_path):
+        img_path = None  # generated-background story - card_generator_hindi handles None fine
+
+    slide_texts_en = result.get("slide_texts") or []
+    first_body_en = slide_texts_en[0] if slide_texts_en else None
+
+    # display_headline used for the English cards may differ from the raw
+    # title (AI hook), but _build_post doesn't return it separately -
+    # translate off of (title, first body chunk) as the grounding pair;
+    # any extra body chunks beyond the first are translated individually
+    # below with the plain single-string translator.
+    headline_hi, detail_hi = translate_story_to_hindi(title, first_body_en, sensitive=sensitive)
+    if not headline_hi:
+        print(f"  -> [hi] translation failed for '{title[:50]}...' - skipping Hindi post for this story")
+        return None
+
+    slide_texts_hi = [detail_hi] if detail_hi else []
+    # Extra info slides beyond the first (only happens on the raw-scrape
+    # fallback path, when get_carousel_slide_texts yielded 2-3 chunks
+    # instead of a single AI detail) - translate each one so the Hindi
+    # carousel doesn't come up short of slides compared to the English one.
+    for extra_chunk in slide_texts_en[1:]:
+        translated_extra = translate_text_to_hindi(extra_chunk)
+        if translated_extra:
+            slide_texts_hi.append(translated_extra)
+        else:
+            print(f"  -> [hi] one extra info-slide translation failed for '{title[:50]}...' - "
+                  f"Hindi carousel will have one fewer slide than English for this story")
+
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    base_filename_hi = f"card_hi_{timestamp}_{slugify(title)}"
+
+    slide_paths_hi = card_generator_hindi.build_carousel(
+        photo_path=img_path,
+        headline=headline_hi,
+        source=source,
+        tag=tag,
+        slide_texts=slide_texts_hi,
+        out_dir=out_dir,
+        base_filename=base_filename_hi,
+        breaking=result.get("is_breaking", False),
+        theme=theme,
+        grayscale=sensitive,
+    )
+
+    return {"slide_paths": slide_paths_hi, "headline_hi": headline_hi, "detail_hi": detail_hi}
 
 
 def run(max_attempts: int = 30, apply_jitter: bool = True, dry_run: bool = False, include_global: bool = True):
@@ -611,6 +690,41 @@ def build_combined_caption(results: list) -> str:
     return caption
 
 
+def build_combined_caption_hindi(caption_en: str, results: list) -> str:
+    """
+    Hindi counterpart to build_combined_caption: translates the already-
+    written English digest caption (same story order, same facts) into
+    Hindi, with a fresh Hindi-relevant hashtag set. Falls back to a
+    simple templated Hindi numbered list if translation fails, mirroring
+    build_combined_caption's own English fallback.
+    """
+    translated = translate_caption_to_hindi(caption_en)
+    if translated:
+        hashtags = translated["hashtags"]
+        if len(hashtags) < 10:
+            fallback_tags = ["#IndiaNews", "#HindiNews", "#आजकीखबर", "#Trending",
+                              "#BreakingNews", "#DailyNews", "#WorldNews", "#NewsUpdate",
+                              "#CurrentAffairs", "#NewsToday"]
+            for tag in fallback_tags:
+                if len(hashtags) >= 10:
+                    break
+                if tag not in hashtags:
+                    hashtags.append(tag)
+        parts = [translated["caption"], " ".join(hashtags)]
+        return "\n\n".join(parts)
+
+    print("  -> [hi] digest caption translation failed, falling back to templated Hindi digest caption")
+    lines = [f"आज की {len(results)} बड़ी खबरें:\n"]
+    for i, r in enumerate(results, start=1):
+        lines.append(f"{i}. {r['title']} (Source: {r['source']})")
+    caption = "\n".join(lines)
+    caption += (
+        "\n\n#IndiaNews #HindiNews #आजकीखबर #Trending #BreakingNews "
+        "#DailyNews #WorldNews #NewsUpdate #CurrentAffairs #NewsToday"
+    )
+    return caption
+
+
 def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: int = 80,
                   apply_jitter: bool = True, dry_run: bool = False, include_global: bool = True,
                   publish: bool = True) -> dict:
@@ -651,8 +765,19 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
     preview/download, while still reserving those stories so a later
     slot doesn't pick the same ones. The real publish happens later,
     separately, when daily_scheduler.py fires that slot.
+
+    Hindi sister page: when POST_HINDI is on (env POST_HINDI_PAGE, "true"
+    by default), this ALSO builds a Hindi-translated carousel of the
+    same story set via card_generator_hindi and posts it to the Hindi
+    account, right after the English post. Returned dict gains
+    "media_id_hi", "caption_hi", "image_urls_hi" alongside the existing
+    English-only keys. A Hindi build/translate/publish failure never
+    fails or blocks the English post - it's logged and the English
+    result is still returned normally.
     """
-    ensure_token_fresh()
+    ensure_token_fresh(account="en")
+    if POST_HINDI:
+        ensure_token_fresh(account="hi")
     if apply_jitter:
         jitter = random.randint(0, MAX_JITTER_SECONDS)
         print(f"[{datetime.now().isoformat()}] Waiting {jitter}s jitter before running...")
@@ -722,13 +847,38 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
 
     caption = build_combined_caption(results)
 
+    # --- Hindi sister-page content: same stories, translated text, same
+    # photos/theme. Built regardless of dry_run/publish so a dry run
+    # previews both languages - only the actual upload/publish calls
+    # further down are gated on those flags, same as the English path.
+    all_slide_paths_hi, caption_hi = [], ""
+    if POST_HINDI:
+        print(f"  -> [hi] translating and building the Hindi carousel for the same {len(results)} stories...")
+        hi_results = []
+        for r in results:
+            hi = _build_hindi_slides(r, theme=theme)
+            if hi is None:
+                continue  # translation failed for this one story - it's simply absent from the Hindi post
+            r["slide_paths_hi"] = hi["slide_paths"][:images_per_story]
+            r["detail_hi"] = hi["detail_hi"]
+            hi_results.append(r)
+        all_slide_paths_hi = [p for r in hi_results for p in r["slide_paths_hi"]]
+        if len(all_slide_paths_hi) > 10:
+            all_slide_paths_hi = all_slide_paths_hi[:10]
+        if all_slide_paths_hi:
+            caption_hi = build_combined_caption_hindi(caption, results)
+        else:
+            print("  -> [hi] no stories translated successfully - skipping the Hindi post entirely this run")
+
     if dry_run:
-        print(f"  -> [DRY RUN] built {len(results)} stories, {len(all_slide_paths)} images total, "
-              f"skipping upload/publish/mark-as-posted")
-        return {"results": results, "media_id": None, "caption": caption}
+        print(f"  -> [DRY RUN] built {len(results)} stories, {len(all_slide_paths)} images total "
+              f"(+{len(all_slide_paths_hi)} Hindi images), skipping upload/publish/mark-as-posted")
+        return {"results": results, "media_id": None, "caption": caption,
+                "media_id_hi": None, "caption_hi": caption_hi}
 
     print(f"  -> uploading {len(all_slide_paths)} image(s) to Supabase Storage...")
     public_urls = upload_carousel_images(all_slide_paths)
+    public_urls_hi = upload_carousel_images(all_slide_paths_hi) if all_slide_paths_hi else []
 
     if not publish:
         print(f"  -> publish=False (pre-generation mode): reserving these {len(results)} "
@@ -738,20 +888,21 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
             mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=None)
             r["media_id"] = None
             r["image_urls"] = public_urls
-        return {"results": results, "media_id": None, "caption": caption, "image_urls": public_urls}
+        return {"results": results, "media_id": None, "caption": caption, "image_urls": public_urls,
+                "media_id_hi": None, "caption_hi": caption_hi, "image_urls_hi": public_urls_hi}
 
-    print(f"  -> posting ONE combined carousel ({len(results)} stories, {len(public_urls)} images) to Instagram...")
+    print(f"  -> posting ONE combined carousel ({len(results)} stories, {len(public_urls)} images) to Instagram (en)...")
     try:
         if len(public_urls) >= 2:
-            media_id = post_carousel_to_instagram(public_urls, caption)
+            media_id = post_carousel_to_instagram(public_urls, caption, account="en")
         else:
-            media_id = post_to_instagram(public_urls[0], caption)
+            media_id = post_to_instagram(public_urls[0], caption, account="en")
     except Exception as e:
-        print(f"  -> Instagram publish failed: {e}")
+        print(f"  -> Instagram publish failed (en): {e}")
         print(f"  -> checking the account's recent media in case it actually posted "
               f"despite the error (Meta sometimes returns an error for a call that "
               f"succeeded server-side)...")
-        media_id = find_recent_matching_post(caption)
+        media_id = find_recent_matching_post(caption, account="en")
         if media_id:
             print(f"  -> confirmed: post {media_id} actually went live despite the error - "
                   f"marking these stories as posted so they aren't retried/duplicated")
@@ -760,21 +911,45 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
                 r["media_id"] = media_id
             print(f"\nDone: post {media_id} confirmed live ({len(results)} stories, "
                   f"{len(public_urls)} images).")
-            return {"results": results, "media_id": media_id, "caption": caption}
-        print(f"  -> confirmed: it genuinely did not post - leaving these stories "
-              f"unmarked so they can be retried")
-        return {"results": results, "media_id": None, "caption": caption}
+        else:
+            print(f"  -> confirmed: it genuinely did not post - leaving these stories "
+                  f"unmarked so they can be retried")
+            return {"results": results, "media_id": None, "caption": caption,
+                     "media_id_hi": None, "caption_hi": caption_hi}
+    else:
+        for r in results:
+            mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=media_id)
+            r["media_id"] = media_id
+            r["image_urls"] = public_urls
+        print(f"\nDone: posted 1 carousel with {len(results)} stories / {len(public_urls)} images "
+              f"in priority order. Media ID: {media_id}")
 
-    for r in results:
-        mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=media_id)
-        r["media_id"] = media_id
-        r["image_urls"] = public_urls
+    # --- Publish the Hindi post. English is never blocked or rolled back
+    # by a Hindi failure (the English post above already happened) - a
+    # Hindi publish problem is only ever logged here.
+    media_id_hi = None
+    if public_urls_hi:
+        print(f"  -> posting the Hindi carousel ({len(public_urls_hi)} images) to Instagram (hi)...")
+        try:
+            if len(public_urls_hi) >= 2:
+                media_id_hi = post_carousel_to_instagram(public_urls_hi, caption_hi, account="hi")
+            else:
+                media_id_hi = post_to_instagram(public_urls_hi[0], caption_hi, account="hi")
+            print(f"  -> [hi] posted. Media ID: {media_id_hi}")
+        except Exception as e:
+            print(f"  -> [hi] Instagram publish failed: {e}")
+            print("  -> [hi] checking the Hindi account's recent media in case it actually posted "
+                  "despite the error...")
+            media_id_hi = find_recent_matching_post(caption_hi, account="hi")
+            if media_id_hi:
+                print(f"  -> [hi] confirmed: post {media_id_hi} actually went live despite the error.")
+            else:
+                print("  -> [hi] confirmed: it genuinely did not post this run. The English post "
+                      "already went out fine - this only affects the Hindi page.")
 
-    print(f"\nDone: posted 1 carousel with {len(results)} stories / {len(public_urls)} images "
-          f"in priority order. Media ID: {media_id}")
-    return {"results": results, "media_id": media_id, "caption": caption, "image_urls": public_urls}
+    return {"results": results, "media_id": media_id, "caption": caption, "image_urls": public_urls,
+            "media_id_hi": media_id_hi, "caption_hi": caption_hi, "image_urls_hi": public_urls_hi}
 
 
 if __name__ == "__main__":
     run_combined(story_count=5, images_per_story=2)
-
