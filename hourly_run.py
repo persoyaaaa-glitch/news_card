@@ -861,6 +861,7 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
                 continue  # translation failed for this one story - it's simply absent from the Hindi post
             r["slide_paths_hi"] = hi["slide_paths"][:images_per_story]
             r["detail_hi"] = hi["detail_hi"]
+            r["headline_hi"] = hi["headline_hi"]
             hi_results.append(r)
         all_slide_paths_hi = [p for r in hi_results for p in r["slide_paths_hi"]]
         if len(all_slide_paths_hi) > 10:
