@@ -31,6 +31,12 @@ Usage:
     python test_post.py --multi                    # preview: 10 stories, as if posting for real (no upload)
     python test_post.py --multi --live              # POSTS 10 real, separate Instagram posts (20 images)
     python test_post.py --multi --multi-count 5 --live   # posts 5 real stories instead of 10
+
+    python test_post.py --hindi                    # preview: builds + translates one story, nothing posted
+    python test_post.py --hindi --live              # POSTS 1 real post to the HINDI account ONLY
+                                                     # (English account is never touched, and the story is
+                                                     # never marked as posted, so it doesn't affect the
+                                                     # normal automated schedule at all)
 """
 import argparse
 import json
@@ -144,11 +150,50 @@ def _run_batch_trial(story_count: int, max_attempts: int):
     print("=" * 60)
 
 
+def _print_result_hindi(result: dict, live: bool):
+    if not result:
+        print("\nNo postable story found this run (all candidates were duplicates, "
+              "or nothing had a usable image/text, or every translation attempt failed). "
+              "Try again in a bit.")
+        return
+
+    print("\n" + "=" * 60)
+    print(f"HINDI TEST {'POST (LIVE, HINDI ACCOUNT ONLY)' if live else 'PREVIEW (nothing published)'}")
+    print("=" * 60)
+    print(f"Headline (EN) : {result['title']}")
+    print(f"Headline (HI) : {result['headline_hi']}")
+    print(f"Source        : {result['source']}")
+    print(f"Link          : {result['link']}")
+    print(f"Slides        : {len(result['slide_paths_hi'])} -> {', '.join(result['slide_paths_hi'])}")
+    print("-" * 60)
+    print("CAPTION (Hindi, includes hashtags):\n")
+    print(result["caption_hi"])
+    print("-" * 60)
+
+    if live:
+        print(f"Instagram media ID (hi): {result.get('media_id_hi')}")
+        print("Posted to the HINDI account only - the English account was never touched, "
+              "and this story was NOT marked as posted, so it's still fully available "
+              "for the real English/combined pipeline.")
+    else:
+        os.makedirs(PREVIEW_DIR, exist_ok=True)
+        meta_path = os.path.join(PREVIEW_DIR, "last_preview_hi.json")
+        with open(meta_path, "w", encoding="utf-8") as f:
+            json.dump({k: v for k, v in result.items() if k != "media_id_hi"}, f, indent=2, ensure_ascii=False)
+        print(f"Preview metadata saved to {meta_path}")
+        print("Nothing was uploaded or posted, and this story was NOT marked as posted.")
+    print("=" * 60)
+
+
 def main():
     parser = argparse.ArgumentParser(description="Run the pipeline once (or as a multi-story trial), for testing.")
     parser.add_argument("--live", action="store_true",
                          help="Actually publish to Instagram (default: preview only, nothing posted). "
                               "Ignored if --batch is passed - batch trials are always preview-only.")
+    parser.add_argument("--hindi", action="store_true",
+                         help="Test-post ONE story to the Hindi account only (English is never touched, "
+                              "and the story is never marked as posted). Preview-only unless --live is "
+                              "also passed. Takes priority over --batch/--multi if combined.")
     parser.add_argument("--max-attempts", type=int, default=30,
                          help="How many candidate stories to fetch/screen before giving up (default: 30).")
     parser.add_argument("--batch", action="store_true",
@@ -162,6 +207,19 @@ def main():
     parser.add_argument("--multi-count", type=int, default=10,
                          help="Number of stories to post in --multi mode (default: 10).")
     args = parser.parse_args()
+
+    if args.hindi:
+        if args.live:
+            confirm = input(
+                "This will publish ONE real post to your HINDI Instagram account ONLY "
+                "(English account will not be touched). Type 'yes' to continue: "
+            )
+            if confirm.strip().lower() != "yes":
+                print("Cancelled - nothing was posted.")
+                sys.exit(0)
+        result = hourly_run.run_hindi_test(max_attempts=args.max_attempts, dry_run=not args.live)
+        _print_result_hindi(result, live=args.live)
+        return
 
     if args.multi:
         if args.live:
