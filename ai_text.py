@@ -434,6 +434,129 @@ def format_instagram_caption(result: dict, source: str) -> str:
     return "\n\n".join(parts)
 
 
+HINDI_STORY_TRANSLATE_PROMPT_TEMPLATE = """You are localizing a real news carousel slide (already written in English) for an Indian Hindi-language sister news Instagram page - same story, same facts, just told the way a Hindi news outlet would actually phrase it in natural, everyday Hindi (Devanagari script). Not a stiff literal translation.
+
+Keep all numbers, dates, and facts exactly as given. Transliterate proper nouns (people, places, organizations, teams) into Devanagari using common Hindi-news convention (e.g. "United States" -> "अमेरिका", "Modi" -> "मोदी"), EXCEPT widely-used acronyms/brand names Hindi outlets normally keep in Roman script (e.g. "IPL", "ISRO", "GDP", "AI").
+{sensitive_instruction}
+HEADLINE (English, max ~12 words): {headline}
+DETAIL (English, 2-3 sentences): {detail}
+
+Respond with ONLY a JSON object, no markdown fences, no preamble, in exactly this shape:
+{{"headline": "...", "detail": "..."}}
+"""
+
+
+def translate_story_to_hindi(headline: str, detail_text: str, timeout: int = 30, sensitive: bool = False) -> tuple:
+    """
+    Translates an already-generated English hook headline + detail
+    summary into natural Hindi news phrasing, for feeding straight into
+    card_generator_hindi.build_carousel as the `headline` / a slide_texts
+    entry for the Hindi-language carousel of the SAME story (same facts,
+    same photo, same theme - just the text is localized).
+
+    sensitive: pass True for stories involving death, sexual assault,
+    murder, or similarly serious/tragic subjects - keeps the Hindi
+    phrasing plain and factual, matching the English version's tone
+    (see hourly_run.is_sensitive_story / SENSITIVE_INSTRUCTION).
+
+    Returns (headline_hi, detail_hi) - either may be None if
+    translation/parsing failed, so callers should skip building the
+    Hindi post for that story rather than posting an untranslated or
+    partially-translated card.
+    """
+    if not headline:
+        return None, None
+
+    prompt = HINDI_STORY_TRANSLATE_PROMPT_TEMPLATE.format(
+        headline=headline,
+        detail=detail_text or "",
+        sensitive_instruction=SENSITIVE_INSTRUCTION if sensitive else "",
+    )
+    raw_text = _call_gemini(prompt, timeout=timeout)
+    if not raw_text:
+        return None, None
+
+    parsed = _extract_json(raw_text)
+    if not parsed:
+        print(f"[ai_text] could not parse Hindi story translation as JSON: {raw_text[:200]!r}")
+        return None, None
+
+    headline_hi = (parsed.get("headline") or "").strip() or None
+    detail_hi = (parsed.get("detail") or "").strip() or None
+    return headline_hi, detail_hi
+
+
+SIMPLE_HINDI_TRANSLATE_PROMPT_TEMPLATE = """Translate the following English news text into natural, everyday Hindi (Devanagari script), the way an Indian Hindi news outlet would phrase it - not a stiff literal translation. Keep numbers, dates, and proper nouns accurate (transliterate people/places/organizations into Devanagari per common Hindi-news convention; keep widely-used acronyms like IPL/ISRO/GDP/AI in Roman script).
+
+TEXT:
+\"\"\"
+{text}
+\"\"\"
+
+Respond with ONLY the translated Hindi text - no preamble, no quotes, no explanation, no markdown.
+"""
+
+
+def translate_text_to_hindi(text: str, timeout: int = 30) -> str | None:
+    """
+    Generic single-string Hindi translation - used for extra carousel
+    body-text slides beyond the first (translate_story_to_hindi only
+    covers headline + one detail slide in a single call; additional
+    info slides, when present, go through this one at a time).
+    """
+    if not text:
+        return None
+    prompt = SIMPLE_HINDI_TRANSLATE_PROMPT_TEMPLATE.format(text=text)
+    raw_text = _call_gemini(prompt, timeout=timeout)
+    if not raw_text:
+        return None
+    cleaned = raw_text.strip().strip('"').strip()
+    return cleaned or None
+
+
+CAPTION_HINDI_TRANSLATE_PROMPT_TEMPLATE = """You are localizing a finished Instagram caption (for a combined multi-story news carousel) into Hindi, for a Hindi-language sister page of the same news account. Translate the prose portion into natural, everyday Hindi (Devanagari) the way a Hindi news outlet's Instagram caption would actually read - not a stiff literal translation. Keep story order and every fact, number, name, and source exactly as given in the English version.
+
+Also produce a fresh hashtag list for the Hindi audience: a mix of Hindi-news discovery tags (e.g. #HindiNews, #IndiaNews, #आजकीखबर, #Breaking) and a few tags specific to this batch's actual topics. 8-12 hashtags.
+
+ENGLISH CAPTION (source article credits and any existing hashtags are included below - ignore the old hashtags, you're writing new ones):
+\"\"\"
+{caption}
+\"\"\"
+
+Respond with ONLY a JSON object, no markdown fences, no preamble, in exactly this shape:
+{{"caption": "...", "hashtags": ["#...", "#..."]}}
+"""
+
+
+def translate_caption_to_hindi(caption_en: str, timeout: int = 30) -> dict | None:
+    """
+    Translates a finished English Instagram caption into a Hindi caption
+    + a fresh Hindi-relevant hashtag set. Returns {"caption": str,
+    "hashtags": list[str]} or None on failure - callers should fall back
+    to a simple templated Hindi caption in that case (see
+    hourly_run.build_combined_caption_hindi).
+    """
+    if not caption_en:
+        return None
+
+    prompt = CAPTION_HINDI_TRANSLATE_PROMPT_TEMPLATE.format(caption=caption_en)
+    raw_text = _call_gemini(prompt, timeout=timeout, max_output_tokens=2048)
+    if not raw_text:
+        return None
+
+    parsed = _extract_json(raw_text)
+    if not parsed:
+        print(f"[ai_text] could not parse Hindi caption translation as JSON: {raw_text[:200]!r}")
+        return None
+
+    caption = (parsed.get("caption") or "").strip()
+    hashtags = [h.strip() for h in (parsed.get("hashtags") or []) if h.strip()]
+
+    if not caption:
+        return None
+    return {"caption": caption, "hashtags": hashtags}
+
+
 if __name__ == "__main__":
     sample_headline = "Government announces new policy on renewable energy investment for 2027"
     sample_text = (
