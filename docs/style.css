@@ -85,6 +85,11 @@ body{
   text-overflow:ellipsis;margin-top:2px;
 }
 .slot-meta{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);flex-shrink:0;}
+.hi-badge{
+  font-family:'JetBrains Mono',monospace;font-size:9px;letter-spacing:.05em;
+  color:var(--amber);border:1px solid var(--amber);border-radius:4px;
+  padding:1px 4px;margin-left:4px;vertical-align:middle;
+}
 
 .footnote{
   text-align:center;font-size:12px;color:var(--text-dim);margin-top:28px;line-height:1.5;
@@ -109,6 +114,15 @@ body{
   background:var(--panel);border:1px solid var(--line);color:var(--text);
   width:32px;height:32px;border-radius:50%;font-size:18px;line-height:1;cursor:pointer;
 }
+
+.lang-tabs{display:flex;gap:6px;margin-bottom:12px;}
+.lang-tabs[hidden]{display:none;}
+.lang-tab{
+  flex:1;padding:9px;border-radius:9px;border:1px solid var(--line);background:var(--panel);
+  color:var(--text-dim);font-family:'JetBrains Mono',monospace;font-weight:600;font-size:12px;
+  letter-spacing:.06em;cursor:pointer;
+}
+.lang-tab.active{background:var(--amber);color:#1a1200;border-color:var(--amber);}
 
 .slides-scroller{
   display:flex;gap:8px;overflow-x:auto;padding-bottom:4px;scroll-snap-type:x mandatory;
