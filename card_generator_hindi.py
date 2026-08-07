@@ -2,21 +2,28 @@
 card_generator_hindi.py
 Hindi (Devanagari) version of card_generator.py — same "news card" layout
 and logic (1080x1350 Instagram-portrait card, hook slide + info-slide
-carousel), but the headline/body/tag/source copy is Hindi and only the
-two attached font families are used:
+carousel), but the headline/body/tag/source copy is Hindi and only two
+font families are used, ROTATING one-by-one across posts (never mixed
+within a single card — every text element on one card uses the same
+family, so the card reads as one consistent typographic choice):
 
-  - Inknut Antiqua  -> Devanagari + Latin serif/display face.
-    Used for the headline, the info-slide body copy, and any Hindi
-    tag/source/badge text (it's the only one of the two fonts that has
-    Devanagari glyphs at all — League Spartan has none).
-  - League Spartan   -> clean Latin sans. Used for tag/source/badge text
-    ONLY when that particular string is pure Latin (e.g. a wire-service
-    name like "Reuters" or "PTI" that a caller keeps un-translated).
+  - Kalam                  -> handwritten-style Devanagari + Latin face.
+    Weights available: Light, Regular, Bold.
+  - Eczar                  -> serif slab Devanagari + Latin face.
+    Weights available: Regular, Medium, SemiBold, Bold, ExtraBold.
 
-Font choice per string is auto-detected (see `_has_devanagari`), so the
-same call site works whether the caller passes Hindi or Latin text for
-tag/source/breaking-label — it never silently falls back to a font that
-can't render the string.
+Both families have full native Devanagari AND Latin glyph coverage, so
+(unlike the old Inknut Antiqua / League Spartan setup) there's no
+per-string script detection needed anymore — whichever family is active
+for this card renders every string on it, Hindi or Latin alike.
+
+Which family is "active" for a given card is passed in via the
+`font_family` param ("kalam" or "eczar") on build_news_card /
+build_info_slide / build_carousel. Callers that want strict one-by-one
+rotation across posts (e.g. hourly_run.py) should track that externally
+(see `_next_font_family` in hourly_run.py, mirroring the existing
+theme_rotation pattern) and pass the result in. If not passed, a random
+family is picked once per carousel — fine for standalone/test runs.
 
 IMPORTANT — Devanagari shaping: Devanagari needs OpenType shaping
 (conjunct formation, matra reordering) or the glyphs come out in the
@@ -122,50 +129,45 @@ def _hex_to_rgb(hex_color: str) -> tuple:
 
 
 # --- fonts ---------------------------------------------------------------
-# Only the two attached families are used anywhere in this file.
-#   Inknut Antiqua  -> has Devanagari glyphs (and Latin), so it's the
-#                       default for headline + body, and for tag/meta/
-#                       badge text whenever that text is Hindi.
-#   League Spartan   -> Latin-only. Used for tag/meta/badge text only
-#                       when that specific string is pure Latin.
+# Only the two attached families are used anywhere in this file, and a
+# whole card uses exactly ONE of them (see `font_family` param below) —
+# rotation between the two happens across posts, never within one card.
 _FONT_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "fonts_hindi")
 
-DEVA_FONTS = {
-    "black": _os.path.join(_FONT_DIR, "InknutAntiqua-Black.ttf"),
-    "extrabold": _os.path.join(_FONT_DIR, "InknutAntiqua-ExtraBold.ttf"),
-    "bold": _os.path.join(_FONT_DIR, "InknutAntiqua-Bold.ttf"),
-    "semibold": _os.path.join(_FONT_DIR, "InknutAntiqua-SemiBold.ttf"),
-    "medium": _os.path.join(_FONT_DIR, "InknutAntiqua-Medium.ttf"),
-    "regular": _os.path.join(_FONT_DIR, "InknutAntiqua-Regular.ttf"),
-    "light": _os.path.join(_FONT_DIR, "InknutAntiqua-Light.ttf"),
+# Per-family, per-role font file. Both families cover Devanagari + Latin
+# natively, so one file per role is enough — no separate Deva/Latin
+# routing needed the way the old Inknut/League setup required.
+FONT_FAMILIES = {
+    "kalam": {
+        "headline": _os.path.join(_FONT_DIR, "Kalam-Bold.ttf"),
+        "body": _os.path.join(_FONT_DIR, "Kalam-Regular.ttf"),
+        "tag": _os.path.join(_FONT_DIR, "Kalam-Bold.ttf"),
+        "meta": _os.path.join(_FONT_DIR, "Kalam-Regular.ttf"),
+    },
+    "eczar": {
+        # Eczar has a full weight range and declares both dev2 + legacy
+        # deva script tables, so it shapes correctly (verified) unlike
+        # Tiro Devanagari Hindi, which was dropped for this reason.
+        "headline": _os.path.join(_FONT_DIR, "Eczar-ExtraBold.ttf"),
+        "body": _os.path.join(_FONT_DIR, "Eczar-Regular.ttf"),
+        "tag": _os.path.join(_FONT_DIR, "Eczar-Bold.ttf"),
+        "meta": _os.path.join(_FONT_DIR, "Eczar-SemiBold.ttf"),
+    },
 }
 
-LATIN_FONTS = {
-    "black": _os.path.join(_FONT_DIR, "LeagueSpartan-Black.ttf"),
-    "extrabold": _os.path.join(_FONT_DIR, "LeagueSpartan-ExtraBold.ttf"),
-    "bold": _os.path.join(_FONT_DIR, "LeagueSpartan-Bold.ttf"),
-    "semibold": _os.path.join(_FONT_DIR, "LeagueSpartan-SemiBold.ttf"),
-    "medium": _os.path.join(_FONT_DIR, "LeagueSpartan-Medium.ttf"),
-    "regular": _os.path.join(_FONT_DIR, "LeagueSpartan-Regular.ttf"),
-    "light": _os.path.join(_FONT_DIR, "LeagueSpartan-Light.ttf"),
-    "extralight": _os.path.join(_FONT_DIR, "LeagueSpartan-ExtraLight.ttf"),
-    "thin": _os.path.join(_FONT_DIR, "LeagueSpartan-Thin.ttf"),
-}
+# Order used for standalone/random fallback (when no font_family is
+# passed in) — hourly_run.py drives the real strict one-by-one rotation
+# externally and always passes font_family explicitly.
+FONT_FAMILY_CHOICES = ["kalam", "eczar"]
+DEFAULT_FONT_FAMILY = "kalam"
 
-# Headline (hook slide) and info-slide body copy are always assumed to be
-# Hindi, so they always use Inknut Antiqua (which also has full Latin
-# coverage, so an occasional English word/number inside a Hindi headline
-# still renders fine in the same font — no mid-string font-swapping needed).
-FONT_HEADLINE_WEIGHT = "extrabold"
-FONT_BODY_WEIGHT = "medium"
 
-# Tag pill / source line / BREAKING badge are short strings that might be
-# Hindi (translated category, Hindi source name) or Latin (wire-service
-# name kept in Roman script) depending on what the caller passes in, so
-# these are resolved per-string via _script_font_path() below instead of
-# being pinned to one family.
-FONT_TAG_WEIGHT = "bold"
-FONT_META_WEIGHT = "semibold"
+def _font_path(family: str, role: str) -> str:
+    """Resolves a (family, role) pair to a font file, falling back to
+    DEFAULT_FONT_FAMILY/"body" if either is unrecognized so a typo in a
+    caller never hard-crashes card generation."""
+    fam = FONT_FAMILIES.get(family, FONT_FAMILIES[DEFAULT_FONT_FAMILY])
+    return fam.get(role, fam["body"])
 
 # Fallback logo if a card is built without a theme (e.g. the self-test at
 # the bottom of this file). Normal batch runs always pass a theme, which
@@ -182,26 +184,6 @@ if not _pil_features.check("raqm"):
     )
 
 _missing_font_warned = set()
-
-# Devanagari block (+ common punctuation marks used with it). This is
-# intentionally simple string script-detection: "does this text contain
-# any Devanagari codepoints" - good enough to route a whole tag/source/
-# badge string to the right font family.
-_DEVANAGARI_RANGES = ((0x0900, 0x097F), (0xA8E0, 0xA8FF))  # Devanagari, Devanagari Extended
-
-
-def _has_devanagari(text: str) -> bool:
-    return any(any(lo <= ord(ch) <= hi for lo, hi in _DEVANAGARI_RANGES) for ch in text)
-
-
-def _script_font_path(text: str, weight: str) -> str:
-    """Pick Inknut Antiqua if `text` contains any Devanagari characters,
-    otherwise League Spartan - so short mixed-language fields (tag pill,
-    source, BREAKING badge) always render in a font that actually has
-    the glyphs, regardless of which language the caller passed in."""
-    family = DEVA_FONTS if _has_devanagari(text) else LATIN_FONTS
-    return family.get(weight, family["regular"])
-
 
 def _load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
     """Loads a font with the 'raqm' layout engine, which is required for
@@ -428,14 +410,21 @@ def build_news_card(
     breaking: bool = False,
     breaking_label: str = BREAKING_LABEL_HI,
     grayscale: bool = False,
+    font_family: str = None,
 ):
     """Same layout as the English generator's build_news_card, but all
     copy is expected to be Hindi. `tag` may be a canonical English key
     (translated automatically via CATEGORY_LABELS_HI) or an already-
-    localized string. `source` and `breaking_label` are rendered in
-    Inknut Antiqua if they contain Devanagari, League Spartan otherwise."""
+    localized string.
+
+    font_family: "kalam" or "eczar" - which of the two rotating font
+    families this whole card uses (every text element on the card, not
+    just the headline). If omitted, a random family is picked - callers
+    that want strict one-by-one rotation across posts should always
+    pass this explicitly (see hourly_run.py's _next_font_family)."""
     theme = theme or random.choice(HEADLINE_THEMES)
-    headline_font_path = DEVA_FONTS[FONT_HEADLINE_WEIGHT]
+    font_family = font_family or random.choice(FONT_FAMILY_CHOICES)
+    headline_font_path = _font_path(font_family, "headline")
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
 
     # --- top: photo (cropped to fill) or a generated gradient background ---
@@ -472,7 +461,7 @@ def build_news_card(
 
     # --- "illustrative image" label when the photo isn't from the source article ---
     if is_generated_bg:
-        label_font = _load_font(_script_font_path(ILLUSTRATIVE_LABEL_HI, "regular"), 22)
+        label_font = _load_font(_font_path(font_family, "meta"), 22)
         label_text = ILLUSTRATIVE_LABEL_HI
         label_bbox = draw.textbbox((0, 0), label_text, font=label_font)
         label_w = label_bbox[2] - label_bbox[0]
@@ -498,7 +487,7 @@ def build_news_card(
     # never blends into the day's theme color ---
     tag_start_x = pad_x
     if breaking:
-        breaking_font = _load_font(_script_font_path(breaking_label, "bold"), 30)
+        breaking_font = _load_font(_font_path(font_family, "tag"), 30)
         breaking_box = _draw_breaking_badge(draw, pad_x, pad_y, breaking_label, breaking_font)
         tag_start_x = breaking_box[2] + 12  # small gap before the category pill
 
@@ -507,7 +496,7 @@ def build_news_card(
     # fixed unrelated color ---
     tag_text = _tag_label(tag)
     pill_bg, pill_text = ((235, 235, 235), (0, 0, 0)) if grayscale else _pill_colors_from_theme(theme)
-    tag_font = _load_font(_script_font_path(tag_text, FONT_TAG_WEIGHT), 30)
+    tag_font = _load_font(_font_path(font_family, "tag"), 30)
     tag_bbox = draw.textbbox((0, 0), tag_text, font=tag_font)
     tag_w = tag_bbox[2] - tag_bbox[0]
     tag_h = tag_bbox[3] - tag_bbox[1]
@@ -591,7 +580,7 @@ def build_news_card(
                          block_width=max_text_width, center=True)
 
     # --- source / meta line at the bottom of the panel, and the brand logo ---
-    meta_font = _load_font(_script_font_path(source, FONT_META_WEIGHT), 26)
+    meta_font = _load_font(_font_path(font_family, "meta"), 26)
     logo_bottom_y = CANVAS_H - pad_y
     logo_x_gap = 24  # breathing room between the line's end and the logo
     line_end_x = CANVAS_W - pad_x
@@ -623,6 +612,7 @@ def build_info_slide(
     theme: dict = None,
     breaking: bool = False,
     breaking_label: str = BREAKING_LABEL_HI,
+    font_family: str = None,
 ):
     """
     An informational carousel slide: real (or generated-fallback) photo
@@ -630,12 +620,17 @@ def build_info_slide(
     hook slide rather than a repeat - then wrapped Hindi body copy pulled
     from the actual article text, evenly inset on all four sides.
 
+    font_family: "kalam" or "eczar" - same rotation param as
+    build_news_card. Pass the SAME value used for this carousel's hook
+    slide so all slides in one post share one font family.
+
     tint_override: optional (dark_hex, light_hex) pair overriding the
     category's default duotone color, e.g. ("#000000", "#ffffff") for a
     true black-and-white treatment instead of a category-colored tint.
     """
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
     theme = theme or random.choice(HEADLINE_THEMES)
+    font_family = font_family or random.choice(FONT_FAMILY_CHOICES)
 
     is_generated_bg = photo_path is None
     dark_hex, light_hex = tint_override if tint_override else DUOTONE_TINTS.get(tag.upper(), DUOTONE_TINTS["NEWS"])
@@ -667,7 +662,7 @@ def build_info_slide(
     pad_x, pad_y = 40, 40
 
     if is_generated_bg:
-        label_font = _load_font(_script_font_path(ILLUSTRATIVE_LABEL_HI, "regular"), 22)
+        label_font = _load_font(_font_path(font_family, "meta"), 22)
         label_text = ILLUSTRATIVE_LABEL_HI
         label_bbox = draw.textbbox((0, 0), label_text, font=label_font)
         label_w = label_bbox[2] - label_bbox[0]
@@ -691,14 +686,14 @@ def build_info_slide(
     # flagged as breaking, sits left of the category pill ---
     tag_start_x = pad_x
     if breaking:
-        breaking_font = _load_font(_script_font_path(breaking_label, "bold"), 26)
+        breaking_font = _load_font(_font_path(font_family, "tag"), 26)
         breaking_box = _draw_breaking_badge(draw, pad_x, pad_y, breaking_label, breaking_font)
         tag_start_x = breaking_box[2] + 12
 
     # --- tag pill, same theme-matched color as the hook slide, for visual continuity ---
     tag_text = _tag_label(tag)
     pill_bg, pill_text = _pill_colors_from_theme(theme)
-    tag_font = _load_font(_script_font_path(tag_text, FONT_TAG_WEIGHT), 26)
+    tag_font = _load_font(_font_path(font_family, "tag"), 26)
     tag_bbox = draw.textbbox((0, 0), tag_text, font=tag_font)
     tag_w, tag_h = tag_bbox[2] - tag_bbox[0], tag_bbox[3] - tag_bbox[1]
     pill_pad = 16
@@ -715,7 +710,7 @@ def build_info_slide(
     panel_bottom = CANVAS_H - pad_x
     available_h = panel_bottom - panel_top
     body_font, body_wrapped, body_line_h = _autofit_text(
-        draw, body_text, DEVA_FONTS[FONT_BODY_WEIGHT], max_text_width, available_h,
+        draw, body_text, _font_path(font_family, "body"), max_text_width, available_h,
         max_size=58, min_size=34, line_spacing_extra=24,
     )
     body_block_h = body_line_h * len(body_wrapped)
@@ -748,6 +743,7 @@ def build_carousel(
     theme: dict = None,
     breaking: bool = False,
     breaking_label: str = BREAKING_LABEL_HI,
+    font_family: str = None,
 ) -> list:
     """
     Builds a full Hindi carousel: slide 1 is the eye-catching hook (photo +
@@ -755,6 +751,11 @@ def build_carousel(
     informational, using real (translated) article text and a duotone-
     tinted variant of the same photo (or a per-slide generated background
     if there's no photo).
+
+    font_family: "kalam" or "eczar" - which rotating font family this
+    ENTIRE carousel (hook + all info slides) uses. Resolved once here (if
+    not passed) so every slide in the post shares one family, then handed
+    down to build_news_card / build_info_slide.
 
     `slide_texts` is a list of Hindi body-text chunks, one per info slide -
     each entry becomes its own slide. If empty, only the hook slide is built.
@@ -775,6 +776,7 @@ def build_carousel(
     Returns the list of output file paths, in post order.
     """
     theme = theme or random.choice(HEADLINE_THEMES)
+    font_family = font_family or random.choice(FONT_FAMILY_CHOICES)
     _os.makedirs(out_dir, exist_ok=True)
     total_slides = 1 + len(slide_texts)
     paths = []
@@ -792,6 +794,7 @@ def build_carousel(
         breaking=breaking,
         breaking_label=breaking_label,
         grayscale=grayscale,
+        font_family=font_family,
     )
     paths.append(hook_path)
 
@@ -808,6 +811,7 @@ def build_carousel(
             theme=theme,
             breaking=breaking,
             breaking_label=breaking_label,
+            font_family=font_family,
         )
         paths.append(slide_path)
 
