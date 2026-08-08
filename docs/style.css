@@ -155,6 +155,38 @@ body{
 }
 .slot-row.manual{border-color:var(--amber);}
 
+.review-btn{
+  width:100%;margin-top:10px;padding:13px;border-radius:10px;
+  background:transparent;border:1px solid var(--amber);color:var(--amber);
+  font-family:'Archivo',sans-serif;font-weight:700;font-size:14px;cursor:pointer;
+}
+.review-btn:disabled{opacity:.5;border-color:var(--line);color:var(--text-dim);cursor:default;}
+.review-btn[hidden]{display:none;}
+
+/* Review modal (pick/reorder which candidate stories post) */
+.review-list{display:flex;flex-direction:column;gap:8px;}
+.review-row{
+  display:flex;align-items:center;gap:10px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 10px;
+}
+.review-row.unselected{opacity:.65;}
+.review-thumb{width:38px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--panel-2);}
+.review-thumb-empty{border:1px dashed var(--line);}
+.review-main{flex:1;min-width:0;}
+.review-title{
+  font-size:13px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.review-title.sensitive{color:var(--red);}
+.review-source{font-family:'JetBrains Mono',monospace;font-size:10px;color:var(--text-dim);margin-top:2px;}
+.review-actions{display:flex;gap:4px;flex-shrink:0;}
+.review-icon-btn{
+  width:26px;height:26px;border-radius:7px;border:1px solid var(--line);background:var(--panel-2);
+  color:var(--text);font-size:13px;line-height:1;cursor:pointer;display:flex;align-items:center;justify-content:center;
+}
+.review-icon-btn:disabled{opacity:.35;cursor:default;}
+.review-icon-btn.review-add{background:var(--amber);color:#1a1200;border-color:var(--amber);}
+.review-icon-btn.review-remove{color:var(--red);}
+
 .caption-block{
   margin-top:18px;background:var(--panel);border:1px solid var(--line);
   border-radius:12px;padding:14px;
