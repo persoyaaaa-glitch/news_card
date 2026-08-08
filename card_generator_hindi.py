@@ -32,6 +32,17 @@ layout engine, so every font load below explicitly requests
 `ImageFont.Layout.RAQM`. Plain `ImageFont.truetype(...)` (Pillow's
 default "basic" layout) WILL render Hindi text incorrectly — do not
 remove the layout_engine argument.
+
+IMPORTANT — logo: hourly_run.py rotates a shared `theme` dict (gradient
++ logo) that comes from card_generator.HEADLINE_THEMES (the ENGLISH
+module) and passes that same object into both the English AND Hindi
+build calls, purely so the two languages' cards share a matching
+gradient look for the same story. That means `theme["logo"]` here is
+always one of the English page's three logo files — it is NEVER this
+account's own logo. This file deliberately ignores theme["logo"] for
+drawing purposes and always stamps HINDI_LOGO_PATH instead, so the
+Hindi carousel always shows the Hindi account's own branding regardless
+of which theme (gradient) got rotated in for a given post.
 """
 import os as _os
 import random
@@ -92,6 +103,15 @@ ILLUSTRATIVE_LABEL_HI = "सांकेतिक तस्वीर"
 # each card randomly getting a mismatched gradient/logo combo. Identical
 # palette to the English generator's themes so a Hindi and English batch
 # of the same story can share a look.
+#
+# NOTE: the "logo" key in each entry below is kept only so this module's
+# own default (`theme = theme or random.choice(HEADLINE_THEMES)`, used
+# when build_carousel/build_news_card are called standalone/directly,
+# e.g. the __main__ self-test at the bottom of this file) has something
+# valid to fall back to. In the real pipeline, hourly_run.py always
+# passes in the ENGLISH module's theme object instead (see the file
+# docstring above) — and even then, the logo actually drawn on the card
+# ALWAYS comes from HINDI_LOGO_PATH below, never from theme["logo"].
 _ASSETS_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "assets")
 HEADLINE_THEMES = [
     {
@@ -110,6 +130,15 @@ HEADLINE_THEMES = [
         "logo": _os.path.join(_ASSETS_DIR, "logo_silver.png"),
     },
 ]
+
+# The Hindi account's own logo — always used for the bottom-right badge
+# on every Hindi card, regardless of which gradient theme got rotated in
+# and regardless of grayscale/sensitive treatment. Drop the file at
+# assets/logo-hi.png (same assets/ folder the English logos live in —
+# this is the news-card watermark logo, a SEPARATE file from the PWA's
+# logo-hi.png used on the account-picker screen, even though the two
+# happen to share a filename convention).
+HINDI_LOGO_PATH = _os.path.join(_ASSETS_DIR, "logo-hi.png")
 
 
 def _pill_colors_from_theme(theme: dict) -> tuple:
@@ -422,6 +451,11 @@ def build_news_card(
     (translated automatically via CATEGORY_LABELS_HI) or an already-
     localized string.
 
+    Note on `theme`: only its "gradient" is used here (for the headline
+    color) — its "logo" is ignored. The bottom-right badge always comes
+    from HINDI_LOGO_PATH, since `theme` in the real pipeline is actually
+    the English module's theme object (see the file docstring).
+
     font_family: "kalam" or "eczar" - which of the two rotating font
     families this whole card uses (every text element on the card, not
     just the headline). If omitted, a random family is picked - callers
@@ -546,7 +580,7 @@ def build_news_card(
     block_h = line_height * len(wrapped)
     text_y = panel_top + max(0, (available_h - block_h) // 2)
 
-    if _os.path.exists(theme["logo"]) and wrapped:
+    if _os.path.exists(HINDI_LOGO_PATH) and wrapped:
         last_line_bottom = text_y + line_height * len(wrapped)
         if last_line_bottom > logo_top - logo_reserved_gap:
             last_line_bbox = draw.textbbox((0, 0), wrapped[-1], font=headline_font)
@@ -589,15 +623,19 @@ def build_news_card(
     logo_bottom_y = CANVAS_H - pad_y
     logo_x_gap = 24  # breathing room between the line's end and the logo
     line_end_x = CANVAS_W - pad_x
-    if _os.path.exists(theme["logo"]):
+    if _os.path.exists(HINDI_LOGO_PATH):
         line_end_x = (CANVAS_W - pad_x - LOGO_SIZE) - logo_x_gap
     draw.line([(pad_x, meta_y - 20), (line_end_x, meta_y - 20)], fill=(60, 60, 64), width=2)
     draw.text((pad_x, meta_y), source, font=meta_font, fill=MUTED_COLOR)
 
     # --- brand logo, bottom-right corner (square badge) ---
-    if _os.path.exists(theme["logo"]):
-        _draw_logo(canvas, pad_x, logo_bottom_y, logo_size=LOGO_SIZE,
-                   logo_path=_os.path.join(_ASSETS_DIR, "logo_black_white.png") if grayscale else theme["logo"])
+    # Always this account's own logo (see HINDI_LOGO_PATH / file docstring)
+    # regardless of theme or grayscale/sensitive treatment - there's no
+    # separate black-and-white variant of the Hindi logo, so sensitive
+    # stories still show the same color badge rather than falling back
+    # to the English page's B&W asset.
+    if _os.path.exists(HINDI_LOGO_PATH):
+        _draw_logo(canvas, pad_x, logo_bottom_y, logo_size=LOGO_SIZE, logo_path=HINDI_LOGO_PATH)
 
     canvas.save(out_path, "JPEG", quality=92)
     return out_path
@@ -632,6 +670,8 @@ def build_info_slide(
     tint_override: optional (dark_hex, light_hex) pair overriding the
     category's default duotone color, e.g. ("#000000", "#ffffff") for a
     true black-and-white treatment instead of a category-colored tint.
+
+    (No logo on info slides — same as the English generator, by design.)
     """
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
     theme = theme or random.choice(HEADLINE_THEMES)
@@ -768,10 +808,11 @@ def build_carousel(
     grayscale: if True, info slides use a true black-and-white treatment
     instead of the category-colored duotone tint.
 
-    theme: a dict from HEADLINE_THEMES (gradient + matching logo). Pass
-    the SAME theme across every story in a batch so the whole post shares
-    one consistent look. If not provided, a random theme is picked once
-    for this carousel.
+    theme: a dict with a "gradient" key (only the gradient is used here —
+    see build_news_card's docstring on why the logo is NOT taken from
+    this dict). Pass the SAME theme across every story in a batch so the
+    whole post shares one consistent look. If not provided, a random
+    theme is picked once for this carousel.
 
     breaking / breaking_label: if breaking=True, every slide gets a red
     breaking-news badge (Hindi "ब्रेकिंग" by default, override via
