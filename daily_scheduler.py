@@ -40,7 +40,7 @@ import traceback
 from datetime import datetime, timedelta, date, timezone
 
 import hourly_run
-from supabase_client import get_state, save_state, get_manual_slot_indices
+from supabase_client import get_state, save_state, get_manual_slot_indices, get_schedule_override
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_state.json")
 STATE_KEY = "scheduler_state"  # Supabase app_state key, used by check_once()
@@ -89,6 +89,8 @@ IMAGES_PER_STORY = 2
 # down rather than shrinking PEAK_WINDOWS.
 MIN_GAP_MINUTES = 25
 
+MAX_TARGET_POSTS = 25  # hard ceiling on the PWA's "posts today (total)" override
+
 # How often the main loop wakes up to check whether it's time to post.
 # Coarse enough to be cheap, fine enough that posts fire within a minute
 # of their planned time.
@@ -115,6 +117,150 @@ def _random_time_in_window(day: date, window) -> datetime:
     end = datetime(day.year, day.month, day.day, eh, em, tzinfo=IST)
     delta_seconds = int((end - start).total_seconds())
     return start + timedelta(seconds=random.randint(0, max(delta_seconds, 0)))
+
+
+def _generate_additional_times(existing_times: list, count: int, day: date,
+                                not_before: datetime = None,
+                                min_gap_minutes: int = MIN_GAP_MINUTES) -> list:
+    """
+    Draws up to `count` additional weighted-random times for `day`
+    (same PEAK_WINDOWS logic as generate_daily_schedule), each at least
+    min_gap_minutes from every time in `existing_times` AND from every
+    other newly-drawn time. If `not_before` is given, only candidates
+    after that instant are accepted - used when growing TODAY's already
+    -partially-elapsed schedule, so a new slot can't land in the past or
+    a couple minutes from now.
+
+    May return fewer than `count` times if the day's remaining windows
+    can't fit that many more without violating the gap - that's fine,
+    the caller schedules as many as it found room for and logs the rest
+    as "couldn't fit today."
+    """
+    weights = [w[4] for w in PEAK_WINDOWS]
+    all_times = list(existing_times)
+    new_times = []
+    max_tries_total = max(count, 1) * 300
+    tries = 0
+    while len(new_times) < count and tries < max_tries_total:
+        tries += 1
+        window = random.choices(PEAK_WINDOWS, weights=weights, k=1)[0]
+        candidate = _random_time_in_window(day, window)
+        if not_before is not None and candidate <= not_before:
+            continue
+        if all(abs((candidate - t).total_seconds()) >= min_gap_minutes * 60 for t in all_times):
+            all_times.append(candidate)
+            new_times.append(candidate)
+    new_times.sort()
+    return new_times
+
+
+def _append_slots_to_skeleton(date_str: str, new_times: list, start_index: int):
+    """Adds skeleton (unbuilt) rows for newly-added slots to app_state[SLOTS_KEY]
+    so the PWA shows them immediately, matching _publish_schedule_skeleton's format."""
+    slots_state = get_state(SLOTS_KEY, default={})
+    if slots_state.get("date") != date_str:
+        return  # today's skeleton doesn't exist yet somehow - nothing to append to
+    for offset, t in enumerate(new_times):
+        slots_state["slots"].append({
+            "index": start_index + offset, "planned_time": t.isoformat(),
+            "image_urls": [], "caption": "", "stories": [],
+        })
+    save_state(SLOTS_KEY, slots_state)
+
+
+def _remove_slots_from_skeleton(date_str: str, removed_indices: list):
+    """Drops removed slots' rows from app_state[SLOTS_KEY] so the PWA stops showing them."""
+    slots_state = get_state(SLOTS_KEY, default={})
+    if slots_state.get("date") != date_str:
+        return
+    removed = set(removed_indices)
+    slots_state["slots"] = [s for s in slots_state.get("slots", []) if s.get("index") not in removed]
+    save_state(SLOTS_KEY, slots_state)
+
+
+def _apply_target_count(state: dict, override: dict) -> dict:
+    """
+    Applies the PWA's requested total post count for today (schedule_
+    overrides.target_count) by growing or shrinking state["planned_times"]
+    (and the mirrored posted[]/notified[] arrays) - never touching already
+    -posted slots, and never moving any existing slot's index, so
+    time_edits and the Manual flag (both keyed by index) stay valid.
+
+    Growing: new slots are appended at the END (indices current_total,
+    current_total+1, ...) with freshly-drawn weighted-random times later
+    today, honouring MIN_GAP_MINUTES against everything already planned.
+
+    Shrinking: not-yet-posted slots are removed from the END first (the
+    ones with the highest indices), so earlier indices - and anything
+    already keyed off them - never shift.
+
+    Hard-capped at MAX_TARGET_POSTS regardless of what the PWA sent, and
+    never allowed to drop below however many slots are already posted.
+    """
+    target = override.get("target_count") if override else None
+    if not target:
+        return state
+    try:
+        target = int(target)
+    except (TypeError, ValueError):
+        print(f"[schedule-override] ignoring malformed target_count {target!r}")
+        return state
+
+    posted_count = sum(state["posted"])
+    target = max(min(target, MAX_TARGET_POSTS), posted_count)
+    current_total = len(state["planned_times"])
+
+    if target == current_total:
+        return state
+
+    if target < current_total:
+        remove_needed = current_total - target
+        removed_indices = []
+        for i in range(current_total - 1, -1, -1):
+            if remove_needed == 0:
+                break
+            if not state["posted"][i]:
+                removed_indices.append(i)
+                remove_needed -= 1
+        if not removed_indices:
+            return state
+        for i in sorted(removed_indices, reverse=True):
+            del state["planned_times"][i]
+            del state["posted"][i]
+            del state["notified"][i]
+        print(f"[schedule-override] target_count={target}: removed "
+              f"{len(removed_indices)} not-yet-posted slot(s) from the end of "
+              f"today's schedule")
+        _save_state_remote(state)
+        _remove_slots_from_skeleton(state["date"], removed_indices)
+
+    else:  # target > current_total
+        add_needed = target - current_total
+        now = now_ist()
+        existing_dts = [datetime.fromisoformat(t) for t in state["planned_times"]]
+        new_times = _generate_additional_times(
+            existing_dts, add_needed, today_ist(), not_before=now,
+        )
+        if not new_times:
+            print(f"[schedule-override] target_count={target}: couldn't fit any "
+                  f"additional slot(s) later today - not enough room left before "
+                  f"midnight without violating the minimum gap.")
+            return state
+        if len(new_times) < add_needed:
+            print(f"[schedule-override] target_count={target}: could only fit "
+                  f"{len(new_times)}/{add_needed} additional slot(s) later today - "
+                  f"scheduling {current_total + len(new_times)} for today instead.")
+        for t in new_times:
+            state["planned_times"].append(t.isoformat())
+            state["posted"].append(False)
+            state["notified"].append(False)
+        print(f"[schedule-override] target_count={target}: added {len(new_times)} "
+              f"new slot(s) at "
+              f"{', '.join(t.strftime('%H:%M') for t in new_times)}")
+        _save_state_remote(state)
+        _append_slots_to_skeleton(state["date"], new_times, start_index=current_total)
+
+    return state
 
 
 def generate_daily_schedule(day: date = None, min_posts: int = MIN_POSTS_PER_DAY,
@@ -207,6 +353,67 @@ def _publish_schedule_skeleton(today_str: str, planned: list):
     })
 
 
+def _apply_schedule_override(state: dict) -> dict:
+    """
+    Applies any pending PWA-requested schedule changes (schedule_overrides
+    row, saved by saveScheduleChanges() in docs/app.js) to today's state:
+    time_edits (move a not-yet-posted slot's time) and target_count (add
+    or remove slots for the day, capped at MAX_TARGET_POSTS). Called every
+    tick from _ensure_today_schedule_remote(), so both content_pregen.py
+    (build timing) and daily_scheduler.py --check-once (fire timing) see
+    the same edited schedule - previously this table was written by the
+    PWA but never read back by anything, so edits silently had no effect.
+
+    Edits to already-posted or out-of-range slot indices are ignored.
+    Existing slots' indices never change (only removed/appended at the
+    end), so posted[], notified[], time_edits, and Manual flags - all
+    keyed by index - stay valid across an edit.
+    """
+    override = get_schedule_override(state["date"])
+    if not override:
+        return state
+
+    state = _apply_target_count(state, override)
+
+    time_edits = override.get("time_edits") or {}
+    if not time_edits:
+        return state
+
+    changed_indices = {}
+    for idx_str, hhmm in time_edits.items():
+        try:
+            idx = int(idx_str)
+            hh, mm = (int(p) for p in str(hhmm).split(":"))
+        except (ValueError, TypeError):
+            print(f"[schedule-override] skipping malformed time edit {idx_str}={hhmm!r}")
+            continue
+        if idx < 0 or idx >= len(state["planned_times"]):
+            continue
+        if state["posted"][idx]:
+            continue  # can't move a slot that's already fired
+        day = today_ist()
+        new_dt = datetime(day.year, day.month, day.day, hh, mm, tzinfo=IST)
+        if state["planned_times"][idx] != new_dt.isoformat():
+            state["planned_times"][idx] = new_dt.isoformat()
+            changed_indices[idx] = new_dt
+
+    if changed_indices:
+        summary = ", ".join(f"#{i + 1} -> {t.strftime('%H:%M')}" for i, t in changed_indices.items())
+        print(f"[schedule-override] applying {len(changed_indices)} PWA time edit(s): {summary}")
+        _save_state_remote(state)
+        # Keep the PWA's own display (app_state[SLOTS_KEY]) in sync too -
+        # otherwise the schedule would fire at the new time but still show
+        # the old time in the app.
+        slots_state = get_state(SLOTS_KEY, default={})
+        if slots_state.get("date") == state["date"]:
+            for slot in slots_state.get("slots", []):
+                if slot.get("index") in changed_indices:
+                    slot["planned_time"] = changed_indices[slot["index"]].isoformat()
+            save_state(SLOTS_KEY, slots_state)
+
+    return state
+
+
 def _ensure_today_schedule_remote(state: dict) -> dict:
     today_str = today_ist().isoformat()
     if state.get("date") != today_str:
@@ -233,6 +440,8 @@ def _ensure_today_schedule_remote(state: dict) -> dict:
             changed = True
         if changed:
             _save_state_remote(state)
+
+    state = _apply_schedule_override(state)
     return state
 
 
