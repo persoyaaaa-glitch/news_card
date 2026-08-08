@@ -230,6 +230,8 @@ function openModal(slot) {
     storyList.appendChild(li);
   });
 
+  renderReview(slot);
+
   const manualBtn = document.getElementById("manualBtn");
   const manualStatus = document.getElementById("manualStatus");
   const alreadyManual = currentManualIndices.has(slot.index);
@@ -583,3 +585,128 @@ setInterval(tickClock, 1000 * 30);
 refresh();
 setInterval(refresh, 1000 * 60 * 5);
 setupPush().catch((e) => console.error("[push] setupPush failed:", e));
+
+// ---- Review (candidate selection) ----
+// A slot only has .candidates once content_pregen.py's build_candidates()
+// has run for it (see content_pregen.py / hourly_run.build_candidates).
+// currentReviewOrder is the locally-edited, ordered list of selected
+// candidate ids - nothing is saved to Supabase until "Save selection".
+
+let currentReviewOrder = [];
+
+function renderReview(slot) {
+  const section = document.getElementById("reviewSection");
+  const candidates = slot.candidates || [];
+  const alreadyDue = new Date(slot.planned_time) <= nowIST();
+  if (!candidates.length || alreadyDue) {
+    section.hidden = true;
+    return;
+  }
+  section.hidden = false;
+
+  currentReviewOrder = (slot.selected_story_ids && slot.selected_story_ids.length)
+    ? slot.selected_story_ids.slice()
+    : candidates.slice(0, 5).map((c) => c.id);
+
+  renderReviewList(slot, candidates);
+
+  const saveBtn = document.getElementById("saveSelectionBtn");
+  saveBtn.onclick = async () => {
+    if (!currentDateStr || !currentReviewOrder.length) return;
+    const status = document.getElementById("reviewStatus");
+    saveBtn.disabled = true;
+    saveBtn.textContent = "Saving...";
+    status.textContent = "";
+    const result = await saveSlotSelection(currentDateStr, slot.index, currentReviewOrder);
+    if (result && result.ok) {
+      Object.assign(slot, result.slot);
+      status.textContent = "Saved.";
+      renderModalLang(currentModalLang);
+      document.getElementById("modalSub").textContent =
+        `${(slot.stories || []).length} stories · ${(slot.image_urls || []).length} slides`;
+      render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+    } else {
+      status.textContent = (result && result.error) || "Couldn't save - check your connection and try again.";
+    }
+    saveBtn.disabled = false;
+    saveBtn.textContent = "Save selection";
+  };
+}
+
+// Checked candidates render first, in currentReviewOrder; unchecked ones
+// follow in their original priority/sensitivity order (see
+// hourly_run.build_candidates). Re-renders the whole list on every
+// toggle/reorder since the list is short (candidate_count, default 6).
+function renderReviewList(slot, candidates) {
+  const list = document.getElementById("candidateList");
+  list.innerHTML = "";
+
+  const ordered = [
+    ...currentReviewOrder.map((id) => candidates.find((c) => c.id === id)).filter(Boolean),
+    ...candidates.filter((c) => !currentReviewOrder.includes(c.id)),
+  ];
+
+  ordered.forEach((c) => {
+    const checked = currentReviewOrder.includes(c.id);
+    const pos = currentReviewOrder.indexOf(c.id);
+    const row = document.createElement("li");
+    row.className = `candidate-row${checked ? " selected" : ""}${c.is_sensitive ? " sensitive" : ""}`;
+    row.innerHTML = `
+      <input type="checkbox" class="candidate-check" ${checked ? "checked" : ""} ${!checked && currentReviewOrder.length >= 5 ? "disabled" : ""}>
+      <img class="candidate-thumb" src="${(c.image_urls || [])[0] || ""}" loading="lazy">
+      <span class="candidate-title">${escapeHtml(c.title)}</span>
+      ${checked ? `<span class="candidate-reorder">
+        <button type="button" class="candidate-up" ${pos === 0 ? "disabled" : ""} aria-label="Move up">&uarr;</button>
+        <button type="button" class="candidate-down" ${pos === currentReviewOrder.length - 1 ? "disabled" : ""} aria-label="Move down">&darr;</button>
+      </span>` : ""}
+    `;
+
+    row.querySelector(".candidate-check").addEventListener("change", (e) => {
+      if (e.target.checked) {
+        if (currentReviewOrder.length >= 5) { e.target.checked = false; return; }
+        currentReviewOrder.push(c.id);
+      } else {
+        currentReviewOrder = currentReviewOrder.filter((id) => id !== c.id);
+      }
+      renderReviewList(slot, candidates);
+    });
+
+    const upBtn = row.querySelector(".candidate-up");
+    const downBtn = row.querySelector(".candidate-down");
+    if (upBtn) upBtn.addEventListener("click", () => {
+      const i = currentReviewOrder.indexOf(c.id);
+      if (i > 0) {
+        [currentReviewOrder[i - 1], currentReviewOrder[i]] = [currentReviewOrder[i], currentReviewOrder[i - 1]];
+        renderReviewList(slot, candidates);
+      }
+    });
+    if (downBtn) downBtn.addEventListener("click", () => {
+      const i = currentReviewOrder.indexOf(c.id);
+      if (i >= 0 && i < currentReviewOrder.length - 1) {
+        [currentReviewOrder[i + 1], currentReviewOrder[i]] = [currentReviewOrder[i], currentReviewOrder[i + 1]];
+        renderReviewList(slot, candidates);
+      }
+    });
+
+    list.appendChild(row);
+  });
+
+  document.getElementById("reviewCount").textContent = `${currentReviewOrder.length}/5 selected`;
+}
+
+async function saveSlotSelection(dateStr, slotIndex, selectedIds) {
+  try {
+    const resp = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/save-slot-selection`, {
+      method: "POST",
+      headers: {
+        apikey: CONFIG.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex, selected_story_ids: selectedIds }),
+    });
+    return await resp.json();
+  } catch (e) {
+    return { ok: false, error: String(e) };
+  }
+}
