@@ -262,6 +262,11 @@ def _publish_prebuilt_slot(slot: dict):
     from instagram_publish import (
         post_carousel_to_instagram, post_to_instagram, find_recent_matching_post,
     )
+    from token_refresh import ensure_token_fresh
+
+    ensure_token_fresh(account="en")
+    if slot.get("image_urls_hi"):
+        ensure_token_fresh(account="hi")
 
     image_urls = slot["image_urls"]
     caption = slot["caption"]
@@ -269,21 +274,45 @@ def _publish_prebuilt_slot(slot: dict):
           f"{len(image_urls)} images)...")
     try:
         if len(image_urls) >= 2:
-            media_id = post_carousel_to_instagram(image_urls, caption)
+            media_id = post_carousel_to_instagram(image_urls, caption, account="en")
         else:
-            media_id = post_to_instagram(image_urls[0], caption)
+            media_id = post_to_instagram(image_urls[0], caption, account="en")
         print(f"  -> posted. Media ID: {media_id}")
     except Exception as e:
         print(f"  -> Instagram publish failed: {e}")
         print("  -> checking the account's recent media in case it actually posted "
               "despite the error...")
-        media_id = find_recent_matching_post(caption)
+        media_id = find_recent_matching_post(caption, account="en")
         if media_id:
             print(f"  -> confirmed: post {media_id} actually went live despite the error.")
         else:
             print("  -> confirmed: it genuinely did not post. The stories in this slot "
                   "were already reserved at pre-generation time, so they won't be "
                   "retried automatically - check the app/logs and post manually if needed.")
+
+    # --- Publish the Hindi sister post, if content_pregen.py built one for
+    # this slot. English is never blocked or rolled back by a Hindi
+    # failure - the English post above already happened either way.
+    image_urls_hi = slot.get("image_urls_hi") or []
+    caption_hi = slot.get("caption_hi") or ""
+    if image_urls_hi:
+        print(f"  -> publishing pre-built Hindi content ({len(image_urls_hi)} images)...")
+        try:
+            if len(image_urls_hi) >= 2:
+                media_id_hi = post_carousel_to_instagram(image_urls_hi, caption_hi, account="hi")
+            else:
+                media_id_hi = post_to_instagram(image_urls_hi[0], caption_hi, account="hi")
+            print(f"  -> [hi] posted. Media ID: {media_id_hi}")
+        except Exception as e:
+            print(f"  -> [hi] Instagram publish failed: {e}")
+            print("  -> [hi] checking the Hindi account's recent media in case it actually "
+                  "posted despite the error...")
+            media_id_hi = find_recent_matching_post(caption_hi, account="hi")
+            if media_id_hi:
+                print(f"  -> [hi] confirmed: post {media_id_hi} actually went live despite the error.")
+            else:
+                print("  -> [hi] confirmed: it genuinely did not post this slot - the English "
+                      "post already went out fine, this only affects the Hindi page.")
 
 
 def _check_manual_slot(state: dict, index: int):
