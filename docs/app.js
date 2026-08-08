@@ -14,6 +14,31 @@ function fmtDate(d) {
   return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
 }
 
+// ---- Accounts (home screen) ----
+//
+// Every Instagram account this app manages. logo is a path relative to
+// this file - drop the matching image next to index.html/app.js. "en"
+// doesn't have a real logo yet (placeholder = icon-192.png) until one's
+// uploaded; swap ACCOUNTS[0].logo once you have it, nothing else needs
+// to change.
+const ACCOUNTS = [
+  { lang: "en", handle: "timely.brought", label: "ENGLISH", logo: "logo-en.png" },
+  { lang: "hi", handle: "timely.samachar.hindi", label: "HINDI", logo: "logo-hi.png" },
+];
+
+function accountFor(lang) {
+  return ACCOUNTS.find((a) => a.lang === lang) || ACCOUNTS[0];
+}
+
+// Slot content (stories/captions/images) is shared 1:1 by index between
+// languages, but each language has its OWN clock time and its OWN
+// posted-flag (see daily_scheduler.py's dual-track scheduling) - this
+// picks the right field for whichever account is currently open.
+function plannedTimeOf(slot, lang) {
+  const iso = lang === "hi" ? slot.planned_time_hi : slot.planned_time;
+  return new Date(iso || slot.planned_time);
+}
+
 // ---- Supabase (read-only anon access, RLS-restricted - see supabase_app_additions.sql) ----
 
 async function fetchDailySlots() {
@@ -43,8 +68,18 @@ async function fetchRepoTraffic() {
   return rows.length ? rows[0].value : null;
 }
 
-async function fetchManualIndices(dateStr) {
-  const url = `${CONFIG.SUPABASE_URL}/rest/v1/slot_overrides?slot_date=eq.${dateStr}&select=slot_index`;
+// Reads the per-language manual flag (manual_en / manual_hi - added by
+// migration_hi_manual_flag.sql, which renamed the original single
+// `manual` column). Also now actually filters on the flag's value
+// (=eq.true) instead of returning every row that exists for the date
+// regardless of its value, which the original version did.
+function _manualColumn(lang) {
+  return lang === "hi" ? "manual_hi" : "manual_en";
+}
+
+async function fetchManualIndices(dateStr, lang) {
+  const column = _manualColumn(lang);
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/slot_overrides?slot_date=eq.${dateStr}&${column}=eq.true&select=slot_index`;
   const resp = await fetch(url, {
     headers: {
       apikey: CONFIG.SUPABASE_ANON_KEY,
@@ -56,7 +91,8 @@ async function fetchManualIndices(dateStr) {
   return new Set(rows.map((r) => r.slot_index));
 }
 
-async function markSlotManual(dateStr, slotIndex) {
+async function markSlotManual(dateStr, slotIndex, lang) {
+  const column = _manualColumn(lang);
   const url = `${CONFIG.SUPABASE_URL}/rest/v1/slot_overrides`;
   const resp = await fetch(url, {
     method: "POST",
@@ -66,7 +102,7 @@ async function markSlotManual(dateStr, slotIndex) {
       "Content-Type": "application/json",
       Prefer: "resolution=merge-duplicates",
     },
-    body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex, manual: true }),
+    body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex, [column]: true }),
   });
   return resp.ok;
 }
@@ -121,22 +157,98 @@ async function saveSubscription(sub) {
   }
 }
 
+// ---- Home screen / navigation ----
+
+let currentAccountLang = null; // null = on the home screen
+let lastBackPressAt = 0;
+
+function renderAccountList() {
+  const list = document.getElementById("accountList");
+  list.innerHTML = "";
+  ACCOUNTS.forEach((acc) => {
+    const row = document.createElement("div");
+    row.className = "account-row";
+    row.innerHTML = `
+      <img class="account-logo" src="${acc.logo}" alt="">
+      <div class="account-main">
+        <div class="account-handle">${escapeHtml(acc.handle)}</div>
+        <div class="account-label">${acc.label}</div>
+      </div>
+      <span class="account-arrow">&rsaquo;</span>
+    `;
+    row.addEventListener("click", () => selectAccount(acc.lang));
+    list.appendChild(row);
+  });
+}
+
+function updateAccountHeader(lang) {
+  const acc = accountFor(lang);
+  const logo = document.getElementById("headerLogo");
+  const eyebrow = document.getElementById("accountEyebrow");
+  logo.src = acc.logo;
+  logo.hidden = false;
+  eyebrow.textContent = acc.handle.toUpperCase();
+}
+
+function selectAccount(lang) {
+  currentAccountLang = lang;
+  document.getElementById("homeScreen").hidden = true;
+  document.getElementById("app").hidden = false;
+  updateAccountHeader(lang);
+  history.pushState({ screen: "schedule", lang }, "");
+  refresh();
+}
+
+function showHomeScreen() {
+  currentAccountLang = null;
+  document.getElementById("app").hidden = true;
+  document.getElementById("homeScreen").hidden = false;
+}
+
+function showExitToast() {
+  const toast = document.getElementById("exitToast");
+  toast.hidden = false;
+  setTimeout(() => {
+    toast.hidden = true;
+  }, 1800);
+}
+
+document.getElementById("backBtn").addEventListener("click", () => history.back());
+
+window.addEventListener("popstate", () => {
+  if (currentAccountLang !== null) {
+    // Was viewing a schedule - this pop takes us back to the home screen.
+    showHomeScreen();
+    return;
+  }
+  // Already on the home screen and got a back press with nothing above
+  // it in our own stack - double-back-to-exit, not a real navigation.
+  const now = Date.now();
+  if (now - lastBackPressAt < 2000) {
+    return; // second press within the window - let the browser actually exit/navigate away
+  }
+  lastBackPressAt = now;
+  showExitToast();
+  history.pushState({ screen: "home" }, ""); // re-arm so the next back press is caught here too
+});
+
 // ---- Rendering ----
 
 let currentSlots = [];
 let currentManualIndices = new Set();
 let currentDateStr = null;
 
-function statusOf(slot, allSorted, index) {
+function statusOf(slot, allSorted, index, lang) {
   const now = nowIST();
-  const planned = new Date(slot.planned_time);
+  const planned = plannedTimeOf(slot, lang);
   if (planned <= now) return "past";
-  const nextUpcoming = allSorted.find((s) => new Date(s.planned_time) > now);
+  const nextUpcoming = allSorted.find((s) => plannedTimeOf(s, lang) > now);
   if (nextUpcoming && nextUpcoming.index === slot.index) return "next";
   return "pending";
 }
 
 function render(data, manualIndices) {
+  const lang = currentAccountLang || "en";
   currentDateStr = data.date;
   currentManualIndices = manualIndices || new Set();
   document.getElementById("dateLabel").textContent = data.date
@@ -157,18 +269,22 @@ function render(data, manualIndices) {
   empty.hidden = true;
 
   const now = nowIST();
-  const pastCount = slots.filter((s) => new Date(s.planned_time) <= now).length;
+  const pastCount = slots.filter((s) => plannedTimeOf(s, lang) <= now).length;
   updateProgress(pastCount, slots.length);
 
   list.querySelectorAll(".slot-row").forEach((el) => el.remove());
 
   slots.forEach((slot, i) => {
-    const planned = new Date(slot.planned_time);
-    const status = statusOf(slot, slots, i);
+    const planned = plannedTimeOf(slot, lang);
+    const status = statusOf(slot, slots, i, lang);
     const isManual = currentManualIndices.has(slot.index);
     const row = document.createElement("div");
     row.className = `slot-row ${status}${isManual ? " manual" : ""}`;
     const topStory = (slot.stories && slot.stories[0]) || null;
+    const otherLangHasContent = lang === "hi"
+      ? (slot.image_urls || []).length > 0
+      : (slot.image_urls_hi || []).length > 0;
+    const otherLangBadge = lang === "hi" ? "EN" : "HI";
 
     row.innerHTML = `
       <span class="slot-num">${String(i + 1).padStart(2, "0")}</span>
@@ -177,7 +293,7 @@ function render(data, manualIndices) {
         <div class="slot-time">${fmtTime(planned)}${isManual ? ' <span class="manual-tag">MANUAL</span>' : ""}</div>
         <div class="slot-headline">${topStory ? escapeHtml(topStory.title) : "Pending"}</div>
       </div>
-      <span class="slot-meta">${(slot.stories || []).length}&middot;${(slot.image_urls || []).length}${(slot.image_urls_hi || []).length ? ' <span class="hi-badge">HI</span>' : ""}</span>
+      <span class="slot-meta">${(slot.stories || []).length}&middot;${(lang === "hi" ? (slot.image_urls_hi || []) : (slot.image_urls || [])).length}${otherLangHasContent ? ` <span class="hi-badge">${otherLangBadge}</span>` : ""}</span>
     `;
     row.addEventListener("click", () => openModal(slot));
     list.appendChild(row);
@@ -206,20 +322,18 @@ let currentModalLang = "en";
 
 function openModal(slot) {
   currentModalSlot = slot;
-  currentModalLang = "en";
+  currentModalLang = currentAccountLang || "en"; // default to whichever account you opened this from
   const modal = document.getElementById("modal");
-  const planned = new Date(slot.planned_time);
+  const planned = plannedTimeOf(slot, currentModalLang);
   document.getElementById("modalTime").textContent = fmtTime(planned) + " IST";
-  document.getElementById("modalSub").textContent =
-    `${(slot.stories || []).length} stories · ${(slot.image_urls || []).length} slides`;
 
   const hasHindi = (slot.image_urls_hi || []).length > 0;
   const langTabs = document.getElementById("langTabs");
   langTabs.hidden = !hasHindi;
-  document.getElementById("langTabEn").classList.add("active");
-  document.getElementById("langTabHi").classList.remove("active");
+  document.getElementById("langTabEn").classList.toggle("active", currentModalLang === "en");
+  document.getElementById("langTabHi").classList.toggle("active", currentModalLang === "hi");
 
-  renderModalLang("en");
+  renderModalLang(currentModalLang);
 
   const storyList = document.getElementById("storyList");
   storyList.innerHTML = "";
@@ -230,10 +344,13 @@ function openModal(slot) {
     storyList.appendChild(li);
   });
 
-  renderReview(slot);
-
   const manualBtn = document.getElementById("manualBtn");
   const manualStatus = document.getElementById("manualStatus");
+  // The manual flag/button always belongs to the ACCOUNT you opened this
+  // modal from (currentAccountLang), not whichever language tab you're
+  // currently previewing - "take over" means "I'll post this account's
+  // version myself," regardless of which tab you're glancing at.
+  const takeoverLang = currentAccountLang || "en";
   const alreadyManual = currentManualIndices.has(slot.index);
   manualBtn.disabled = alreadyManual;
   manualBtn.textContent = alreadyManual
@@ -246,7 +363,7 @@ function openModal(slot) {
     if (!currentDateStr) return;
     manualBtn.disabled = true;
     manualBtn.textContent = "Marking...";
-    const ok = await markSlotManual(currentDateStr, slot.index);
+    const ok = await markSlotManual(currentDateStr, slot.index, takeoverLang);
     if (ok) {
       currentManualIndices.add(slot.index);
       manualBtn.textContent = "Taken over \u2014 auto-post skipped for this one";
@@ -275,6 +392,9 @@ function renderModalLang(lang) {
 
   const imageUrls = lang === "hi" ? (slot.image_urls_hi || []) : (slot.image_urls || []);
   const caption = lang === "hi" ? (slot.caption_hi || "") : (slot.caption || "");
+
+  document.getElementById("modalSub").textContent =
+    `${(slot.stories || []).length} stories \u00b7 ${imageUrls.length} slides`;
 
   const scroller = document.getElementById("slidesScroller");
   scroller.innerHTML = "";
@@ -331,9 +451,10 @@ function closeScheduleModal() {
 }
 
 function renderScheduleModal() {
+  const lang = currentAccountLang || "en";
   const now = nowIST();
-  const postedSlots = currentSlots.filter((s) => new Date(s.planned_time) <= now);
-  const pendingSlots = currentSlots.filter((s) => new Date(s.planned_time) > now);
+  const postedSlots = currentSlots.filter((s) => plannedTimeOf(s, lang) <= now);
+  const pendingSlots = currentSlots.filter((s) => plannedTimeOf(s, lang) > now);
 
   document.getElementById("scheduleModalSub").textContent =
     `${postedSlots.length} posted \u00b7 ${pendingSlots.length} remaining`;
@@ -343,7 +464,7 @@ function renderScheduleModal() {
   const currentTotal = pendingOverride.target_count || currentSlots.length;
   countInput.value = currentTotal;
   document.getElementById("postsCountHint").textContent =
-    `Already-posted slots (${postedSlots.length}) can't be removed, so the lowest you can go is ${countInput.min}. Max 25/day.`;
+    `Already-posted slots (${postedSlots.length}) can't be removed, so the lowest you can go is ${countInput.min}. Max 25/day. This only edits the ${accountFor(lang).handle} schedule.`;
 
   const list = document.getElementById("pendingTimesList");
   list.innerHTML = "";
@@ -355,7 +476,7 @@ function renderScheduleModal() {
     return;
   }
   pendingSlots.forEach((slot) => {
-    const planned = new Date(slot.planned_time);
+    const planned = plannedTimeOf(slot, lang);
     const row = document.createElement("div");
     row.className = "pending-time-row";
     row.innerHTML = `
@@ -386,6 +507,7 @@ async function triggerScheduleCheck() {
 }
 
 async function saveScheduleChanges() {
+  const lang = currentAccountLang || "en";
   const saveBtn = document.getElementById("saveScheduleBtn");
   const status = document.getElementById("scheduleSaveStatus");
   saveBtn.disabled = true;
@@ -393,9 +515,19 @@ async function saveScheduleChanges() {
   status.textContent = "";
 
   const targetCount = parseInt(document.getElementById("postsCountInput").value, 10);
-  const timeEdits = { ...(pendingOverride.time_edits || {}) };
+
+  // time_edits is keyed by slot index -> {"en": "HH:MM", "hi": "HH:MM"}
+  // (see daily_scheduler.py's _apply_time_edits). Only touch this
+  // account's own language key per index, preserving whatever's already
+  // there for the OTHER language on the same slot.
+  const timeEdits = {};
+  Object.entries(pendingOverride.time_edits || {}).forEach(([idx, val]) => {
+    timeEdits[idx] = typeof val === "object" && val !== null ? { ...val } : { en: val };
+  });
   document.querySelectorAll("#pendingTimesList input[type='time']").forEach((input) => {
-    if (input.value) timeEdits[input.dataset.index] = input.value;
+    if (!input.value) return;
+    const idx = input.dataset.index;
+    timeEdits[idx] = { ...(timeEdits[idx] || {}), [lang]: input.value };
   });
 
   const ok = await saveScheduleOverride(currentDateStr, isNaN(targetCount) ? null : targetCount, timeEdits);
@@ -522,9 +654,11 @@ async function subscribeAndSave(reg) {
 // ---- Boot ----
 
 async function refresh() {
+  if (!currentAccountLang) return; // nothing to load until an account is picked on the home screen
+  const lang = currentAccountLang;
   try {
     const data = await fetchDailySlots();
-    const manualIndices = data.date ? await fetchManualIndices(data.date) : new Set();
+    const manualIndices = data.date ? await fetchManualIndices(data.date, lang) : new Set();
     render(data, manualIndices);
   } catch (e) {
     console.error(e);
@@ -580,133 +714,9 @@ document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") refresh();
 });
 
+history.replaceState({ screen: "home" }, "");
+renderAccountList();
 tickClock();
 setInterval(tickClock, 1000 * 30);
-refresh();
 setInterval(refresh, 1000 * 60 * 5);
 setupPush().catch((e) => console.error("[push] setupPush failed:", e));
-
-// ---- Review (candidate selection) ----
-// A slot only has .candidates once content_pregen.py's build_candidates()
-// has run for it (see content_pregen.py / hourly_run.build_candidates).
-// currentReviewOrder is the locally-edited, ordered list of selected
-// candidate ids - nothing is saved to Supabase until "Save selection".
-
-let currentReviewOrder = [];
-
-function renderReview(slot) {
-  const section = document.getElementById("reviewSection");
-  const candidates = slot.candidates || [];
-  const alreadyDue = new Date(slot.planned_time) <= nowIST();
-  if (!candidates.length || alreadyDue) {
-    section.hidden = true;
-    return;
-  }
-  section.hidden = false;
-
-  currentReviewOrder = (slot.selected_story_ids && slot.selected_story_ids.length)
-    ? slot.selected_story_ids.slice()
-    : candidates.slice(0, 5).map((c) => c.id);
-
-  renderReviewList(slot, candidates);
-
-  const saveBtn = document.getElementById("saveSelectionBtn");
-  saveBtn.onclick = async () => {
-    if (!currentDateStr || !currentReviewOrder.length) return;
-    const status = document.getElementById("reviewStatus");
-    saveBtn.disabled = true;
-    saveBtn.textContent = "Saving...";
-    status.textContent = "";
-    const result = await saveSlotSelection(currentDateStr, slot.index, currentReviewOrder);
-    if (result && result.ok) {
-      Object.assign(slot, result.slot);
-      status.textContent = "Saved.";
-      renderModalLang(currentModalLang);
-      document.getElementById("modalSub").textContent =
-        `${(slot.stories || []).length} stories · ${(slot.image_urls || []).length} slides`;
-      render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
-    } else {
-      status.textContent = (result && result.error) || "Couldn't save - check your connection and try again.";
-    }
-    saveBtn.disabled = false;
-    saveBtn.textContent = "Save selection";
-  };
-}
-
-// Checked candidates render first, in currentReviewOrder; unchecked ones
-// follow in their original priority/sensitivity order (see
-// hourly_run.build_candidates). Re-renders the whole list on every
-// toggle/reorder since the list is short (candidate_count, default 6).
-function renderReviewList(slot, candidates) {
-  const list = document.getElementById("candidateList");
-  list.innerHTML = "";
-
-  const ordered = [
-    ...currentReviewOrder.map((id) => candidates.find((c) => c.id === id)).filter(Boolean),
-    ...candidates.filter((c) => !currentReviewOrder.includes(c.id)),
-  ];
-
-  ordered.forEach((c) => {
-    const checked = currentReviewOrder.includes(c.id);
-    const pos = currentReviewOrder.indexOf(c.id);
-    const row = document.createElement("li");
-    row.className = `candidate-row${checked ? " selected" : ""}${c.is_sensitive ? " sensitive" : ""}`;
-    row.innerHTML = `
-      <input type="checkbox" class="candidate-check" ${checked ? "checked" : ""} ${!checked && currentReviewOrder.length >= 5 ? "disabled" : ""}>
-      <img class="candidate-thumb" src="${(c.image_urls || [])[0] || ""}" loading="lazy">
-      <span class="candidate-title">${escapeHtml(c.title)}</span>
-      ${checked ? `<span class="candidate-reorder">
-        <button type="button" class="candidate-up" ${pos === 0 ? "disabled" : ""} aria-label="Move up">&uarr;</button>
-        <button type="button" class="candidate-down" ${pos === currentReviewOrder.length - 1 ? "disabled" : ""} aria-label="Move down">&darr;</button>
-      </span>` : ""}
-    `;
-
-    row.querySelector(".candidate-check").addEventListener("change", (e) => {
-      if (e.target.checked) {
-        if (currentReviewOrder.length >= 5) { e.target.checked = false; return; }
-        currentReviewOrder.push(c.id);
-      } else {
-        currentReviewOrder = currentReviewOrder.filter((id) => id !== c.id);
-      }
-      renderReviewList(slot, candidates);
-    });
-
-    const upBtn = row.querySelector(".candidate-up");
-    const downBtn = row.querySelector(".candidate-down");
-    if (upBtn) upBtn.addEventListener("click", () => {
-      const i = currentReviewOrder.indexOf(c.id);
-      if (i > 0) {
-        [currentReviewOrder[i - 1], currentReviewOrder[i]] = [currentReviewOrder[i], currentReviewOrder[i - 1]];
-        renderReviewList(slot, candidates);
-      }
-    });
-    if (downBtn) downBtn.addEventListener("click", () => {
-      const i = currentReviewOrder.indexOf(c.id);
-      if (i >= 0 && i < currentReviewOrder.length - 1) {
-        [currentReviewOrder[i + 1], currentReviewOrder[i]] = [currentReviewOrder[i], currentReviewOrder[i + 1]];
-        renderReviewList(slot, candidates);
-      }
-    });
-
-    list.appendChild(row);
-  });
-
-  document.getElementById("reviewCount").textContent = `${currentReviewOrder.length}/5 selected`;
-}
-
-async function saveSlotSelection(dateStr, slotIndex, selectedIds) {
-  try {
-    const resp = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/save-slot-selection`, {
-      method: "POST",
-      headers: {
-        apikey: CONFIG.SUPABASE_ANON_KEY,
-        Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex, selected_story_ids: selectedIds }),
-    });
-    return await resp.json();
-  } catch (e) {
-    return { ok: false, error: String(e) };
-  }
-}
