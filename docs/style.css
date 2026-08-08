@@ -66,6 +66,7 @@ body{
 .slot-row:active{background:var(--panel-2);}
 .slot-row.next{border-color:var(--amber);background:linear-gradient(180deg,#1a1912,var(--panel) 60%);}
 .slot-row.past{opacity:.5;}
+.slot-row.overdue{border-color:var(--red);}
 
 .slot-num{
   font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);
@@ -75,6 +76,7 @@ body{
 .slot-dot.posted{background:var(--green);}
 .slot-dot.next{background:var(--amber);box-shadow:0 0 0 4px rgba(219,210,180,.22);}
 .slot-dot.pending{background:var(--text-dim);}
+.slot-dot.overdue{background:var(--red);}
 
 .slot-main{flex:1;min-width:0;}
 .slot-time{
