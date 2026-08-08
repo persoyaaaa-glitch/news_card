@@ -85,6 +85,8 @@
     <button class="download-all-btn" id="downloadAllBtn">Download all slides</button>
     <div class="download-status" id="downloadStatus"></div>
 
+    <button class="review-btn" id="reviewBtn" hidden>Review &amp; reorder stories</button>
+
     <button class="manual-btn" id="manualBtn">Take over &mdash; post this one manually</button>
     <div class="manual-status" id="manualStatus"></div>
 
@@ -131,6 +133,35 @@
     <div class="download-status" id="scheduleSaveStatus"></div>
     <p class="footnote" style="margin-top:14px;">Saving triggers an immediate scheduler check.
       If that fails for any reason, it still applies on the next automatic check (~30 min).</p>
+  </div>
+</div>
+
+<!-- Review modal: choose which candidate stories post, and in what order -->
+<div id="reviewModal" class="modal" hidden>
+  <div class="modal-sheet">
+    <div class="modal-head">
+      <div>
+        <div class="modal-time">Review stories</div>
+        <div class="modal-sub" id="reviewModalSub">0/5 selected</div>
+      </div>
+      <button class="close-btn" id="closeReviewModalBtn" aria-label="Close">&times;</button>
+    </div>
+
+    <p class="field-hint" style="margin-top:0;">More candidates were built than will post. Pick up to 5
+      and set the order &mdash; leave it alone and the top 5 by priority go out automatically.</p>
+
+    <div class="field-block">
+      <span class="field-label">Going out (in order)</span>
+      <div id="reviewSelectedList" class="review-list"></div>
+    </div>
+
+    <div class="field-block">
+      <span class="field-label">Not selected</span>
+      <div id="reviewUnselectedList" class="review-list"></div>
+    </div>
+
+    <button class="download-all-btn" id="saveReviewBtn">Save selection</button>
+    <div class="download-status" id="reviewSaveStatus"></div>
   </div>
 </div>
 

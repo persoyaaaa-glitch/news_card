@@ -1,5 +1,10 @@
 const IST_OFFSET_MIN = 5.5 * 60;
 
+// Must match STORIES_PER_POST in daily_scheduler.py - also enforced
+// server-side by save-slot-selection, this is just so the UI can cap
+// selection and grey out "add" before hitting that 400.
+const MAX_SELECTED_STORIES = 5;
+
 function nowIST() {
   const now = new Date();
   const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
@@ -334,15 +339,17 @@ function openModal(slot) {
   document.getElementById("langTabHi").classList.toggle("active", currentModalLang === "hi");
 
   renderModalLang(currentModalLang);
+  populateStoryList(slot);
 
-  const storyList = document.getElementById("storyList");
-  storyList.innerHTML = "";
-  (slot.stories || []).forEach((s) => {
-    const li = document.createElement("li");
-    if (s.is_sensitive) li.className = "sensitive";
-    li.textContent = `${s.title} — ${s.source || ""}`;
-    storyList.appendChild(li);
-  });
+  const reviewBtn = document.getElementById("reviewBtn");
+  const hasCandidates = (slot.candidates || []).length > 0;
+  const alreadyPast = slotStatus(slot) === "past";
+  reviewBtn.hidden = !hasCandidates;
+  reviewBtn.disabled = alreadyPast;
+  reviewBtn.textContent = alreadyPast
+    ? "Already posted \u2014 can't review"
+    : `Review & reorder stories (${(slot.candidates || []).length} candidates)`;
+  reviewBtn.onclick = () => openReviewModal(slot);
 
   const manualBtn = document.getElementById("manualBtn");
   const manualStatus = document.getElementById("manualStatus");
@@ -421,9 +428,201 @@ function renderModalLang(lang) {
   document.getElementById("copyBtn").textContent = "Copy";
 }
 
+function populateStoryList(slot) {
+  const storyList = document.getElementById("storyList");
+  storyList.innerHTML = "";
+  (slot.stories || []).forEach((s) => {
+    const li = document.createElement("li");
+    if (s.is_sensitive) li.className = "sensitive";
+    li.textContent = `${s.title} — ${s.source || ""}`;
+    storyList.appendChild(li);
+  });
+}
+
 function closeModal() {
   document.getElementById("modal").hidden = true;
   currentModalSlot = null;
+}
+
+// A slot isn't stored with its own status - it's derived from the current
+// clock + its position among today's slots (see statusOf), same as render()
+// uses for the list rows. Recomputed on demand for whichever slot the
+// review/manual buttons are currently looking at.
+function slotStatus(slot) {
+  const lang = currentAccountLang || "en";
+  const idx = currentSlots.indexOf(slot);
+  return statusOf(slot, currentSlots, idx, lang);
+}
+
+// ---- Review modal (pick + reorder which candidate stories actually post) ----
+//
+// A slot is built with CANDIDATE_STORY_COUNT candidates (see
+// hourly_run.build_candidates / content_pregen.py) but only
+// STORIES_PER_POST of them go out. Until this is reviewed, the top
+// STORIES_PER_POST by priority are what's selected (slot.selected_story_ids),
+// which is exactly what would've posted before this feature existed.
+// Saving here calls the save-slot-selection Edge Function, which
+// recomputes slot.image_urls/caption/stories from the chosen subset+order
+// and writes it back - see that function for details.
+
+let reviewSlot = null;
+let reviewSelected = [];   // ordered candidate ids that will post
+let reviewUnselected = []; // remaining candidate ids, original priority order
+
+function openReviewModal(slot) {
+  reviewSlot = slot;
+  const candidateIds = (slot.candidates || []).map((c) => c.id);
+  const chosen = (slot.selected_story_ids || []).filter((id) => candidateIds.includes(id));
+  reviewSelected = (chosen.length ? chosen : candidateIds).slice(0, MAX_SELECTED_STORIES);
+  reviewUnselected = candidateIds.filter((id) => !reviewSelected.includes(id));
+  document.getElementById("reviewSaveStatus").textContent = "";
+  document.getElementById("reviewModal").hidden = false;
+  renderReviewModal();
+}
+
+function closeReviewModal() {
+  document.getElementById("reviewModal").hidden = true;
+  reviewSlot = null;
+}
+
+function reviewCandidateById(id) {
+  return (reviewSlot.candidates || []).find((c) => c.id === id);
+}
+
+function reviewRowEl(c, actionsHtml, extraClass) {
+  const thumb = (c.image_urls && c.image_urls[0]) || "";
+  const wrap = document.createElement("div");
+  wrap.innerHTML = `
+    <div class="review-row${extraClass ? " " + extraClass : ""}" data-id="${c.id}">
+      ${thumb ? `<img class="review-thumb" src="${thumb}" loading="lazy">` : '<div class="review-thumb review-thumb-empty"></div>'}
+      <div class="review-main">
+        <div class="review-title${c.is_sensitive ? " sensitive" : ""}">${escapeHtml(c.title)}</div>
+        <div class="review-source">${escapeHtml(c.source || "")}${c.priority_rank ? ` &middot; #${c.priority_rank}` : ""}</div>
+      </div>
+      <div class="review-actions">${actionsHtml}</div>
+    </div>
+  `;
+  return wrap.firstElementChild;
+}
+
+function renderReviewModal() {
+  document.getElementById("reviewModalSub").textContent =
+    `${reviewSelected.length}/${MAX_SELECTED_STORIES} selected`;
+
+  const selectedList = document.getElementById("reviewSelectedList");
+  selectedList.innerHTML = "";
+  if (!reviewSelected.length) {
+    selectedList.innerHTML = '<p class="field-hint">Nothing selected yet - add at least one story below.</p>';
+  }
+  reviewSelected.forEach((id, i) => {
+    const c = reviewCandidateById(id);
+    if (!c) return;
+    const upDisabled = i === 0 ? "disabled" : "";
+    const downDisabled = i === reviewSelected.length - 1 ? "disabled" : "";
+    const actions = `
+      <button class="review-icon-btn" data-action="up" ${upDisabled} aria-label="Move up">&uarr;</button>
+      <button class="review-icon-btn" data-action="down" ${downDisabled} aria-label="Move down">&darr;</button>
+      <button class="review-icon-btn review-remove" data-action="remove" aria-label="Remove">&times;</button>
+    `;
+    const el = reviewRowEl(c, actions);
+    el.querySelector('[data-action="up"]').onclick = () => moveReviewSelected(id, -1);
+    el.querySelector('[data-action="down"]').onclick = () => moveReviewSelected(id, 1);
+    el.querySelector('[data-action="remove"]').onclick = () => deselectReviewCandidate(id);
+    selectedList.appendChild(el);
+  });
+
+  const unselectedList = document.getElementById("reviewUnselectedList");
+  unselectedList.innerHTML = "";
+  if (!reviewUnselected.length) {
+    unselectedList.innerHTML = '<p class="field-hint">No other candidates left.</p>';
+  }
+  const atMax = reviewSelected.length >= MAX_SELECTED_STORIES;
+  reviewUnselected.forEach((id) => {
+    const c = reviewCandidateById(id);
+    if (!c) return;
+    const actions = `<button class="review-icon-btn review-add" data-action="add" ${atMax ? "disabled" : ""} aria-label="Add">&plus;</button>`;
+    const el = reviewRowEl(c, actions, "unselected");
+    const addBtn = el.querySelector('[data-action="add"]');
+    if (addBtn) addBtn.onclick = () => selectReviewCandidate(id);
+    unselectedList.appendChild(el);
+  });
+
+  document.getElementById("saveReviewBtn").disabled = !reviewSelected.length;
+}
+
+function selectReviewCandidate(id) {
+  if (reviewSelected.includes(id) || reviewSelected.length >= MAX_SELECTED_STORIES) return;
+  reviewSelected.push(id);
+  reviewUnselected = reviewUnselected.filter((x) => x !== id);
+  renderReviewModal();
+}
+
+function deselectReviewCandidate(id) {
+  reviewSelected = reviewSelected.filter((x) => x !== id);
+  const candidateIds = (reviewSlot.candidates || []).map((c) => c.id);
+  reviewUnselected.push(id);
+  reviewUnselected.sort((a, b) => candidateIds.indexOf(a) - candidateIds.indexOf(b));
+  renderReviewModal();
+}
+
+function moveReviewSelected(id, delta) {
+  const i = reviewSelected.indexOf(id);
+  const j = i + delta;
+  if (i < 0 || j < 0 || j >= reviewSelected.length) return;
+  [reviewSelected[i], reviewSelected[j]] = [reviewSelected[j], reviewSelected[i]];
+  renderReviewModal();
+}
+
+async function saveSlotSelection(dateStr, slotIndex, selectedIds) {
+  try {
+    const resp = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/save-slot-selection`, {
+      method: "POST",
+      headers: {
+        apikey: CONFIG.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex, selected_story_ids: selectedIds }),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.ok) {
+      return { ok: false, error: (data && data.error) || `save failed (${resp.status})` };
+    }
+    return { ok: true, slot: data.slot };
+  } catch (e) {
+    return { ok: false, error: "check your connection" };
+  }
+}
+
+async function saveReviewSelection() {
+  if (!reviewSlot || !currentDateStr || !reviewSelected.length) return;
+  const saveBtn = document.getElementById("saveReviewBtn");
+  const status = document.getElementById("reviewSaveStatus");
+  saveBtn.disabled = true;
+  saveBtn.textContent = "Saving...";
+  status.textContent = "";
+
+  const result = await saveSlotSelection(currentDateStr, reviewSlot.index, reviewSelected);
+  if (result.ok) {
+    // Merge the recomputed fields straight into the in-memory slot so the
+    // list row and the (still-open) slot modal reflect the new selection
+    // without a full refetch.
+    Object.assign(reviewSlot, result.slot);
+    if (currentModalSlot && currentModalSlot.index === reviewSlot.index) {
+      Object.assign(currentModalSlot, result.slot);
+      renderModalLang(currentModalLang);
+      populateStoryList(currentModalSlot);
+    }
+    render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+    status.textContent = "Saved.";
+    saveBtn.textContent = "Save selection";
+    saveBtn.disabled = false;
+    setTimeout(closeReviewModal, 900);
+  } else {
+    status.textContent = `Couldn't save: ${result.error}`;
+    saveBtn.textContent = "Save selection";
+    saveBtn.disabled = false;
+  }
 }
 
 // ---- Schedule editor modal ----
@@ -702,6 +901,11 @@ document.getElementById("scheduleModal").addEventListener("click", (e) => {
   if (e.target.id === "scheduleModal") closeScheduleModal();
 });
 document.getElementById("saveScheduleBtn").addEventListener("click", saveScheduleChanges);
+document.getElementById("closeReviewModalBtn").addEventListener("click", closeReviewModal);
+document.getElementById("reviewModal").addEventListener("click", (e) => {
+  if (e.target.id === "reviewModal") closeReviewModal();
+});
+document.getElementById("saveReviewBtn").addEventListener("click", saveReviewSelection);
 document.getElementById("postsCountMinus").addEventListener("click", () => {
   const input = document.getElementById("postsCountInput");
   input.value = Math.max(parseInt(input.min, 10) || 1, (parseInt(input.value, 10) || 1) - 1);
