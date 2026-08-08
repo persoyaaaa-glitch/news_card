@@ -341,7 +341,7 @@ function renderScheduleModal() {
   const currentTotal = pendingOverride.target_count || currentSlots.length;
   countInput.value = currentTotal;
   document.getElementById("postsCountHint").textContent =
-    `Already-posted slots (${postedSlots.length}) can't be removed, so the lowest you can go is ${countInput.min}.`;
+    `Already-posted slots (${postedSlots.length}) can't be removed, so the lowest you can go is ${countInput.min}. Max 25/day.`;
 
   const list = document.getElementById("pendingTimesList");
   list.innerHTML = "";
@@ -572,7 +572,7 @@ document.getElementById("postsCountMinus").addEventListener("click", () => {
 });
 document.getElementById("postsCountPlus").addEventListener("click", () => {
   const input = document.getElementById("postsCountInput");
-  input.value = Math.min(15, (parseInt(input.value, 10) || 1) + 1);
+  input.value = Math.min(25, (parseInt(input.value, 10) || 1) + 1);
 });
 document.addEventListener("visibilitychange", () => {
   if (document.visibilityState === "visible") refresh();
