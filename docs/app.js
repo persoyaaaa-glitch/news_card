@@ -243,11 +243,23 @@ let currentSlots = [];
 let currentManualIndices = new Set();
 let currentDateStr = null;
 
+// Status now reflects the REAL posted/posted_hi flag from the backend
+// (daily_scheduler.py writes this the moment a post is CONFIRMED to
+// have gone out - see _mark_slot_posted_in_skeleton), not just whether
+// the clock has passed the planned time. A slot whose time has passed
+// but that isn't actually confirmed posted (failed publish, still
+// retrying) now shows as "overdue" instead of being falsely marked
+// "past"/posted.
 function statusOf(slot, allSorted, index, lang) {
   const now = nowIST();
   const planned = plannedTimeOf(slot, lang);
-  if (planned <= now) return "past";
-  const nextUpcoming = allSorted.find((s) => plannedTimeOf(s, lang) > now);
+  const isPosted = lang === "hi" ? slot.posted_hi : slot.posted;
+  if (isPosted) return "past";
+  if (planned <= now) return "overdue";
+  const nextUpcoming = allSorted.find((s) => {
+    const sPosted = lang === "hi" ? s.posted_hi : s.posted;
+    return !sPosted && plannedTimeOf(s, lang) > now;
+  });
   if (nextUpcoming && nextUpcoming.index === slot.index) return "next";
   return "pending";
 }
@@ -274,7 +286,7 @@ function render(data, manualIndices) {
   empty.hidden = true;
 
   const now = nowIST();
-  const pastCount = slots.filter((s) => plannedTimeOf(s, lang) <= now).length;
+  const pastCount = slots.filter((s) => (lang === "hi" ? s.posted_hi : s.posted)).length;
   updateProgress(pastCount, slots.length);
 
   list.querySelectorAll(".slot-row").forEach((el) => el.remove());
@@ -651,9 +663,8 @@ function closeScheduleModal() {
 
 function renderScheduleModal() {
   const lang = currentAccountLang || "en";
-  const now = nowIST();
-  const postedSlots = currentSlots.filter((s) => plannedTimeOf(s, lang) <= now);
-  const pendingSlots = currentSlots.filter((s) => plannedTimeOf(s, lang) > now);
+  const postedSlots = currentSlots.filter((s) => (lang === "hi" ? s.posted_hi : s.posted));
+  const pendingSlots = currentSlots.filter((s) => !(lang === "hi" ? s.posted_hi : s.posted));
 
   document.getElementById("scheduleModalSub").textContent =
     `${postedSlots.length} posted \u00b7 ${pendingSlots.length} remaining`;
