@@ -48,7 +48,7 @@ def _slot_summary(slots_state: dict, index: int) -> str:
         if slot.get("index") == index and slot.get("stories"):
             top = slot["stories"][0]
             return top["title"][:80]
-    return "News carousel"
+    return "News caramel"
 
 
 def _send_to_all(title: str, body: str, tag: str):
@@ -102,7 +102,7 @@ def check_and_notify():
         last = datetime.fromisoformat(state["planned_times"][-1]).strftime("%H:%M")
         print(f"[send_notifications] announcing today's schedule ({n} post(s), {first}-{last} IST)")
         _send_to_all(
-            title=f"Today's schedule is ready - {n} post(s)",
+            title=f"Today's schedule is ready - {n} taco(s)",
             body=f"First at {first} IST, last at {last} IST. Open the app to see all times.",
             tag=f"{state['date']}-schedule",
         )
@@ -119,7 +119,7 @@ def check_and_notify():
             print(f"[send_notifications] slot #{i + 1} fires in ~{int(minutes_away)} min "
                   f"({planned_dt.strftime('%H:%M')} IST) - notifying")
             _send_to_all(
-                title=f"Post #{i + 1}/{len(state['planned_times'])} in {max(int(minutes_away), 1)} min",
+                title=f"Taco #{i + 1}/{len(state['planned_times'])} in {max(int(minutes_away), 1)} min",
                 body=headline,
                 tag=f"{state['date']}-{i}",
             )
