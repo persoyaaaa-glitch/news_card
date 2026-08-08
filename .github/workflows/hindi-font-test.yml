@@ -21,7 +21,7 @@ jobs:
           from PIL import Image, ImageDraw, ImageFont
           print('Pillow version:', PIL.__version__)
           print('raqm available:', PIL.features.check('raqm'))
-          text = 'अहम सबूत बरामद किए हैं और मास्टरमाइंड ने सीक्रेट ग्रुप बनाया था'
+          text = 'शि वि रा/मध्य/संस्था-डी पी सी/प्रभाग-२/उप प्राचार्य/२०२३-२४ /ई-०७६८। '
           for name, path in [('kalam','fonts_hindi/Kalam-Light.ttf'), ('eczar','fonts_hindi/Eczar-Regular.ttf')]:
               img = Image.new('RGB', (1000,150), 'white')
               draw = ImageDraw.Draw(img)
