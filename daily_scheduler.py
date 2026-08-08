@@ -97,6 +97,7 @@ MAX_TARGET_POSTS = 25
 # carousels of a given slot, just posted at (usually) different times.
 STORIES_PER_POST = 5
 IMAGES_PER_STORY = 2
+CANDIDATE_STORY_COUNT = 6  # candidates built per slot for the PWA review screen; up to STORIES_PER_POST get selected to actually post
 
 # Minimum gap enforced between any two consecutive posts ON THE SAME
 # ACCOUNT, so a busy random draw can't accidentally cluster several

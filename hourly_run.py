@@ -972,6 +972,100 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
             "media_id_hi": media_id_hi, "caption_hi": caption_hi, "image_urls_hi": public_urls_hi}
 
 
+def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_attempts: int = 80,
+                      include_global: bool = True) -> dict:
+    """
+    Like run_combined(publish=False) but does NOT merge stories into one
+    carousel - each candidate story keeps its own uploaded image_urls
+    (and image_urls_hi), so a reviewer can later pick any subset/order
+    of them without re-uploading anything. Used by content_pregen.py to
+    build more candidate stories than will actually post, for the PWA's
+    review screen (see supabase/functions/save-slot-selection).
+
+    Every returned candidate's story is already marked as posted/
+    reserved in Supabase (same as run_combined(publish=False)) so no
+    later slot picks the same story - whether or not it ends up
+    selected for posting.
+
+    Returns {"candidates": [...]} where each candidate is:
+        {id, title, source, link, priority_rank, is_sensitive,
+         detail_text, title_hi, image_urls, image_urls_hi}
+    Sorted the same way run_combined orders a post: sensitive stories
+    first, priority order within each group - so candidates[:N] is
+    exactly what run_combined(story_count=N) would have picked.
+    """
+    ensure_token_fresh(account="en")
+    if POST_HINDI:
+        ensure_token_fresh(account="hi")
+
+    os.makedirs(TMP_DIR, exist_ok=True)
+    os.makedirs(CARD_DIR, exist_ok=True)
+
+    print(f"[{datetime.now().isoformat()}] Surfacing {candidate_count} candidate stories "
+          f"for review (global={include_global})...")
+    articles = fetch_best_and_breaking_news(country="IN", limit_per_query=max_attempts, include_global=include_global)
+    if not articles:
+        print("No articles returned. Exiting.")
+        return {"candidates": []}
+
+    recent_titles = get_recent_titles()
+    results = []
+    theme = _next_theme()
+
+    for article in articles:
+        if len(results) >= candidate_count:
+            break
+        title, link, source = article["title"], article["link"], article["source"] or "News"
+        if is_duplicate_story(title, link, recent_titles=recent_titles):
+            print(f"Skipping (already posted / near-duplicate): {title[:60]}")
+            continue
+        result = _build_post(article, theme=theme, build_full_caption=False)
+        if result is None:
+            continue
+        result["slide_paths"] = result["slide_paths"][:images_per_story]
+        recent_titles.append(title)
+        results.append(result)
+        print(f"  -> candidate #{result['priority_rank']}: {title[:60]} "
+              f"({len(results)}/{candidate_count})")
+
+    if not results:
+        print("No usable candidates found this run.")
+        return {"candidates": []}
+
+    results.sort(key=lambda r: not r.get("is_sensitive", False))
+
+    if POST_HINDI:
+        print(f"  -> [hi] translating {len(results)} candidate stories...")
+        for r in results:
+            hi = _build_hindi_slides(r, theme=theme)
+            if hi is None:
+                r["slide_paths_hi"] = []
+                r["headline_hi"] = ""
+                continue
+            r["slide_paths_hi"] = hi["slide_paths"][:images_per_story]
+            r["headline_hi"] = hi["headline_hi"]
+
+    candidates = []
+    for i, r in enumerate(results):
+        print(f"  -> uploading candidate {i + 1}/{len(results)} images...")
+        image_urls = upload_carousel_images(r["slide_paths"])
+        image_urls_hi = upload_carousel_images(r["slide_paths_hi"]) if r.get("slide_paths_hi") else []
+        mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=None)
+        candidates.append({
+            "id": f"c{i}",
+            "title": r["title"],
+            "source": r["source"],
+            "link": r["link"],
+            "priority_rank": r["priority_rank"],
+            "is_sensitive": r.get("is_sensitive", False),
+            "detail_text": r.get("detail_text"),
+            "title_hi": r.get("headline_hi", ""),
+            "image_urls": image_urls,
+            "image_urls_hi": image_urls_hi,
+        })
+
+    return {"candidates": candidates}
+
 def build_single_caption_hindi(caption_en: str) -> str:
     """
     Hindi counterpart to build_caption for a single-story post: translates
