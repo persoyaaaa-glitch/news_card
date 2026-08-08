@@ -274,7 +274,14 @@ function render(data, manualIndices) {
 
   const list = document.getElementById("list");
   const empty = document.getElementById("emptyState");
-  const slots = (data.slots || []).slice().sort((a, b) => a.index - b.index);
+  // Sort by scheduled time, not by static creation index - a slot's
+  // position (and its displayed 1/2/3... number, which comes from array
+  // position, not slot.index) should always follow its planned time, so
+  // adding more posts or editing a time re-orders the list instead of
+  // just appending new slots to the bottom regardless of when they fire.
+  const slots = (data.slots || []).slice().sort(
+    (a, b) => plannedTimeOf(a, lang) - plannedTimeOf(b, lang)
+  );
   currentSlots = slots;
 
   if (!slots.length) {
@@ -799,12 +806,12 @@ function renderScheduleModal() {
     list.appendChild(p);
     return;
   }
-  pendingSlots.forEach((slot) => {
+  pendingSlots.forEach((slot, i) => {
     const planned = plannedTimeOf(slot, lang);
     const row = document.createElement("div");
     row.className = "pending-time-row";
     row.innerHTML = `
-      <span class="slot-num">${String(slot.index + 1).padStart(2, "0")}</span>
+      <span class="slot-num">${String(i + 1).padStart(2, "0")}</span>
       <span>${(slot.stories && slot.stories[0]) ? escapeHtml(slot.stories[0].title).slice(0, 40) : "Pending"}</span>
       <input type="time" data-index="${slot.index}" value="${fmtTime(planned)}">
     `;
