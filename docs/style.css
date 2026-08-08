@@ -172,6 +172,17 @@ body{
   background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:9px 10px;
 }
 .review-row.unselected{opacity:.65;}
+.review-row{cursor:pointer;}
+.review-row.dragging{
+  position:relative;z-index:5;opacity:.92;border-color:var(--amber);
+  box-shadow:0 8px 22px rgba(0,0,0,.5);
+}
+.review-drag-handle{
+  width:20px;height:40px;flex-shrink:0;display:flex;align-items:center;justify-content:center;
+  color:var(--text-dim);font-size:15px;letter-spacing:-2px;cursor:grab;touch-action:none;
+  margin-left:-4px;
+}
+.review-drag-handle:active{cursor:grabbing;color:var(--text);}
 .review-thumb{width:38px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0;background:var(--panel-2);}
 .review-thumb-empty{border:1px dashed var(--line);}
 .review-main{flex:1;min-width:0;}

@@ -501,11 +501,15 @@ function reviewCandidateById(id) {
   return (reviewSlot.candidates || []).find((c) => c.id === id);
 }
 
-function reviewRowEl(c, actionsHtml, extraClass) {
+function reviewRowEl(c, actionsHtml, extraClass, draggable) {
   const thumb = (c.image_urls && c.image_urls[0]) || "";
+  const handleHtml = draggable
+    ? '<span class="review-drag-handle" aria-label="Drag to reorder">&#8942;&#8942;</span>'
+    : "";
   const wrap = document.createElement("div");
   wrap.innerHTML = `
     <div class="review-row${extraClass ? " " + extraClass : ""}" data-id="${c.id}">
+      ${handleHtml}
       ${thumb ? `<img class="review-thumb" src="${thumb}" loading="lazy">` : '<div class="review-thumb review-thumb-empty"></div>'}
       <div class="review-main">
         <div class="review-title${c.is_sensitive ? " sensitive" : ""}">${escapeHtml(c.title)}</div>
@@ -514,7 +518,116 @@ function reviewRowEl(c, actionsHtml, extraClass) {
       <div class="review-actions">${actionsHtml}</div>
     </div>
   `;
-  return wrap.firstElementChild;
+  const rowEl = wrap.firstElementChild;
+  // Tap anywhere on the row except the action buttons / drag handle to
+  // preview this story's own image(s) - hook + description if it has
+  // two, just the hook if it only has one.
+  rowEl.addEventListener("click", (e) => {
+    if (e.target.closest(".review-actions") || e.target.closest(".review-drag-handle")) return;
+    openStoryPreview(c);
+  });
+  return rowEl;
+}
+
+// ---- Story preview (tap a review row to see its hook/description image(s)) ----
+
+function openStoryPreview(c) {
+  document.getElementById("storyPreviewTitle").textContent = c.title || "Story";
+  document.getElementById("storyPreviewSource").textContent = c.source || "";
+  const scroller = document.getElementById("storyPreviewScroller");
+  scroller.innerHTML = "";
+  const urls = c.image_urls || [];
+  if (!urls.length) {
+    const p = document.createElement("p");
+    p.className = "field-hint";
+    p.textContent = "No preview image available for this story yet.";
+    scroller.appendChild(p);
+  } else {
+    urls.forEach((url) => {
+      const img = document.createElement("img");
+      img.src = url;
+      img.loading = "lazy";
+      scroller.appendChild(img);
+    });
+  }
+  document.getElementById("storyPreviewModal").hidden = false;
+}
+
+function closeStoryPreview() {
+  document.getElementById("storyPreviewModal").hidden = true;
+}
+
+// ---- Drag to reorder ("Going out" list in the review modal) ----
+//
+// Pointer-events based (not native HTML5 drag-and-drop, which doesn't
+// work reliably on touch) so it works with both mouse and touch. Only
+// the drag handle initiates a drag; tapping the rest of the row still
+// opens the preview, and the up/down/remove buttons still work as a
+// fallback/for accessibility.
+
+function findSelectedRowEl(id) {
+  return Array.from(document.querySelectorAll("#reviewSelectedList .review-row"))
+    .find((r) => r.dataset.id === String(id));
+}
+
+function attachDragHandle(handleEl, id) {
+  if (!handleEl) return;
+  handleEl.addEventListener("pointerdown", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    let baseY = e.clientY;
+    document.body.style.userSelect = "none";
+    const startEl = findSelectedRowEl(id);
+    if (startEl) startEl.classList.add("dragging");
+
+    function onMove(ev) {
+      const el = findSelectedRowEl(id);
+      if (!el) return;
+      const dy = ev.clientY - baseY;
+      el.style.transform = `translateY(${dy}px)`;
+
+      const list = document.getElementById("reviewSelectedList");
+      const siblings = Array.from(list.querySelectorAll(".review-row")).filter((r) => r !== el);
+      const draggedRect = el.getBoundingClientRect();
+      const draggedMid = draggedRect.top + draggedRect.height / 2;
+
+      for (const sib of siblings) {
+        const sibRect = sib.getBoundingClientRect();
+        const sibMid = sibRect.top + sibRect.height / 2;
+        const fromIdx = reviewSelected.indexOf(id);
+        const toIdx = reviewSelected.findIndex((x) => String(x) === sib.dataset.id);
+        if (fromIdx === -1 || toIdx === -1) continue;
+        const movingDown = fromIdx < toIdx;
+        if ((movingDown && draggedMid > sibMid) || (!movingDown && draggedMid < sibMid)) {
+          reviewSelected.splice(fromIdx, 1);
+          reviewSelected.splice(toIdx, 0, id);
+          renderReviewModal();
+          const newEl = findSelectedRowEl(id);
+          if (newEl) {
+            newEl.classList.add("dragging");
+            newEl.style.transform = "translateY(0px)";
+          }
+          baseY = ev.clientY; // re-baseline so the row keeps tracking the pointer from its new slot
+          break;
+        }
+      }
+    }
+
+    function onUp() {
+      document.removeEventListener("pointermove", onMove);
+      document.removeEventListener("pointerup", onUp);
+      document.body.style.userSelect = "";
+      const el = findSelectedRowEl(id);
+      if (el) {
+        el.classList.remove("dragging");
+        el.style.transform = "";
+      }
+      renderReviewModal();
+    }
+
+    document.addEventListener("pointermove", onMove);
+    document.addEventListener("pointerup", onUp);
+  });
 }
 
 function renderReviewModal() {
@@ -536,11 +649,12 @@ function renderReviewModal() {
       <button class="review-icon-btn" data-action="down" ${downDisabled} aria-label="Move down">&darr;</button>
       <button class="review-icon-btn review-remove" data-action="remove" aria-label="Remove">&times;</button>
     `;
-    const el = reviewRowEl(c, actions);
+    const el = reviewRowEl(c, actions, "", true);
     el.querySelector('[data-action="up"]').onclick = () => moveReviewSelected(id, -1);
     el.querySelector('[data-action="down"]').onclick = () => moveReviewSelected(id, 1);
     el.querySelector('[data-action="remove"]').onclick = () => deselectReviewCandidate(id);
     selectedList.appendChild(el);
+    attachDragHandle(el.querySelector(".review-drag-handle"), id);
   });
 
   const unselectedList = document.getElementById("reviewUnselectedList");
@@ -917,6 +1031,10 @@ document.getElementById("reviewModal").addEventListener("click", (e) => {
   if (e.target.id === "reviewModal") closeReviewModal();
 });
 document.getElementById("saveReviewBtn").addEventListener("click", saveReviewSelection);
+document.getElementById("closeStoryPreviewBtn").addEventListener("click", closeStoryPreview);
+document.getElementById("storyPreviewModal").addEventListener("click", (e) => {
+  if (e.target.id === "storyPreviewModal") closeStoryPreview();
+});
 document.getElementById("postsCountMinus").addEventListener("click", () => {
   const input = document.getElementById("postsCountInput");
   input.value = Math.max(parseInt(input.min, 10) || 1, (parseInt(input.value, 10) || 1) - 1);
