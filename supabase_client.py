@@ -1,14 +1,16 @@
 """
 supabase_client.py
+
 Three jobs:
-  1. Track which articles have already been posted, so no story is ever
-     repeated - both an exact link check AND a fuzzy title check (catches
-     the same story re-published under a different URL/source with a
-     slightly reworded headline).
-  2. Host each generated card image in Supabase Storage so we have a
-     public URL to hand Instagram's Graph API (it requires image_url,
-     not a raw file upload).
+1. Track which articles have already been posted, so no story is ever
+   repeated - both an exact link check AND a fuzzy title check (catches
+   the same story re-published under a different URL/source with a
+   slightly reworded headline).
+2. Host each generated card image in Supabase Storage so we have a
+   public URL to hand Instagram's Graph API (it requires image_url,
+   not a raw file upload).
 """
+
 import difflib
 import os
 from datetime import datetime, timedelta, timezone
@@ -22,15 +24,7 @@ SUPABASE_URL = os.environ.get("SUPABASE_URL")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY")  # service role key, NOT the anon/public key
 STORAGE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "news-cards")
 
-# How far back to look for near-duplicate titles. Wide enough that an old
-# story recycled by another outlet weeks later still gets caught, without
-# scanning the entire history of the table on every single check.
 _DEDUP_LOOKBACK_DAYS = 60
-
-# Similarity ratio (difflib SequenceMatcher, 0-1) above which two titles
-# are treated as "the same story" rather than coincidentally similar
-# wording. 0.82 catches reworded/re-punctuated headlines of the same
-# event while still telling apart two different stories on the same topic.
 _TITLE_SIMILARITY_THRESHOLD = 0.82
 
 _client: Client = None
@@ -67,18 +61,8 @@ def get_recent_titles(days: int = _DEDUP_LOOKBACK_DAYS) -> list:
 
 
 def is_duplicate_story(title: str, link: str, recent_titles: list = None) -> bool:
-    """
-    Belt-and-suspenders duplicate check so a story is NEVER posted twice,
-    even if a different outlet covers the same event under a different
-    URL and a slightly reworded headline.
-
-    recent_titles: optionally pass a pre-fetched list (from
-    get_recent_titles()) to avoid a fresh DB round-trip per candidate
-    when screening many articles in one run.
-    """
     if is_already_posted(link):
         return True
-
     normalized = _normalize(title)
     candidates = recent_titles if recent_titles is not None else get_recent_titles()
     for prior_title in candidates:
@@ -145,11 +129,25 @@ def save_state(key: str, value):
 
 
 def get_manual_slot_indices(slot_date: str) -> set:
-    """Slot indices the PWA has flagged as 'I'm posting this one myself'
-    for the given date (see slot_overrides table / supabase_app_additions.sql)."""
-    client = get_client()
-    resp = client.table("slot_overrides").select("slot_index").eq("slot_date", slot_date).execute()
-    return {row["slot_index"] for row in resp.data}
+    """
+    Slot indices the PWA has flagged as 'I'm posting this one myself'
+    for the given date (see slot_overrides table / supabase_app_additions.sql).
+
+    Returns an empty set - i.e. "no manual slots" - if the query fails
+    for any reason (table missing, RLS issue, transient network error).
+    This is called unconditionally on EVERY check_once() run, so it must
+    never take the whole scheduler down; failing "no manual overrides"
+    is always safe (worst case a slot that should've been manual gets
+    auto-posted instead of skipped, which is far better than the entire
+    day's posting silently stopping).
+    """
+    try:
+        client = get_client()
+        resp = client.table("slot_overrides").select("slot_index").eq("slot_date", slot_date).execute()
+        return {row["slot_index"] for row in resp.data}
+    except Exception as e:
+        print(f"[supabase_client] get_manual_slot_indices failed, treating as 'no manual slots': {e}")
+        return set()
 
 
 def get_schedule_override(slot_date: str):
