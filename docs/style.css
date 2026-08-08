@@ -1,11 +1,11 @@
 :root{
-  --bg:#0B0D10;
-  --panel:#14171B;
-  --panel-2:#1B1F24;
-  --line:#262B31;
+  --bg:#000000;
+  --panel:#141414;
+  --panel-2:#1C1C1C;
+  --line:#2A2A2A;
   --text:#EDEDED;
   --text-dim:#8B8F98;
-  --amber:#F5A623;
+  --amber:#dbd2b4;
   --green:#3DDC84;
   --red:#FF5C5C;
   --radius:14px;
@@ -64,7 +64,7 @@ body{
   padding:13px 14px;cursor:pointer;transition:border-color .15s ease, background .15s ease;
 }
 .slot-row:active{background:var(--panel-2);}
-.slot-row.next{border-color:var(--amber);background:linear-gradient(180deg,#1c150a,#14171B 60%);}
+.slot-row.next{border-color:var(--amber);background:linear-gradient(180deg,#1a1912,var(--panel) 60%);}
 .slot-row.past{opacity:.5;}
 
 .slot-num{
@@ -73,7 +73,7 @@ body{
 }
 .slot-dot{width:8px;height:8px;border-radius:50%;background:var(--line);flex-shrink:0;}
 .slot-dot.posted{background:var(--green);}
-.slot-dot.next{background:var(--amber);box-shadow:0 0 0 4px rgba(245,166,35,.18);}
+.slot-dot.next{background:var(--amber);box-shadow:0 0 0 4px rgba(219,210,180,.22);}
 .slot-dot.pending{background:var(--text-dim);}
 
 .slot-main{flex:1;min-width:0;}
@@ -213,3 +213,54 @@ body{
   color-scheme:dark;
 }
 .pending-time-row.new-row{border-style:dashed;color:var(--text-dim);}
+
+/* Home screen — account picker */
+.home-screen{
+  max-width:640px;margin:0 auto;padding:calc(env(safe-area-inset-top) + 20px) 16px 32px;
+}
+.home-screen[hidden]{display:none;}
+.home-hdr{margin-bottom:18px;}
+.home-title{font-size:26px;font-weight:800;margin-top:6px;letter-spacing:-.01em;}
+.home-sub{font-size:13px;color:var(--text-dim);margin-top:4px;}
+.account-list{display:flex;flex-direction:column;gap:8px;}
+.account-row{
+  display:flex;align-items:center;gap:12px;
+  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
+  padding:14px;cursor:pointer;transition:border-color .15s ease, background .15s ease;
+}
+.account-row:active{background:var(--panel-2);}
+.account-dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0;}
+.account-main{flex:1;min-width:0;}
+.account-handle{font-size:15px;font-weight:700;color:var(--text);}
+.account-label{font-family:'JetBrains Mono',monospace;font-size:11px;color:var(--text-dim);margin-top:2px;}
+.account-arrow{font-size:20px;color:var(--text-dim);flex-shrink:0;}
+
+/* Back button on schedule screen */
+.hdr-top-left{display:flex;align-items:center;gap:10px;}
+.back-btn{
+  background:var(--panel);border:1px solid var(--line);color:var(--text);
+  width:28px;height:28px;border-radius:50%;font-size:15px;line-height:1;cursor:pointer;
+  display:flex;align-items:center;justify-content:center;flex-shrink:0;
+}
+.back-btn:active{background:var(--panel-2);}
+
+/* Account logos */
+.account-logo{
+  width:34px;height:34px;border-radius:9px;object-fit:cover;flex-shrink:0;
+  border:1px solid var(--line);
+}
+.header-logo{
+  width:20px;height:20px;border-radius:6px;object-fit:cover;flex-shrink:0;
+}
+.header-logo[hidden]{display:none;}
+
+/* Exit toast (double-back-to-exit) */
+.exit-toast{
+  position:fixed;left:50%;bottom:calc(env(safe-area-inset-bottom) + 24px);
+  transform:translateX(-50%);background:var(--panel-2);border:1px solid var(--line);
+  color:var(--text);font-size:13px;font-weight:600;padding:10px 18px;border-radius:20px;
+  z-index:100;box-shadow:0 4px 18px rgba(0,0,0,.4);
+  animation:toast-in .15s ease-out;
+}
+.exit-toast[hidden]{display:none;}
+@keyframes toast-in{from{opacity:0;transform:translateX(-50%) translateY(6px);}to{opacity:1;transform:translateX(-50%) translateY(0);}}
