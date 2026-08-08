@@ -165,6 +165,20 @@
   </div>
 </div>
 
+<!-- Story preview modal: tap any story in the review list to see its image(s) -->
+<div id="storyPreviewModal" class="modal" hidden>
+  <div class="modal-sheet">
+    <div class="modal-head">
+      <div>
+        <div class="modal-time" id="storyPreviewTitle">Story</div>
+        <div class="modal-sub" id="storyPreviewSource"></div>
+      </div>
+      <button class="close-btn" id="closeStoryPreviewBtn" aria-label="Close">&times;</button>
+    </div>
+    <div class="slides-scroller" id="storyPreviewScroller"></div>
+  </div>
+</div>
+
 <div id="exitToast" class="exit-toast" hidden>Press back again to exit</div>
 
 <script src="config.js"></script>

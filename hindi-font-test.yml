@@ -1,0 +1,41 @@
+name: Debug Hindi font rendering
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  debug-font:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Print Pillow/raqm info and render test image
+        run: |
+          python -c "
+          import PIL, PIL.features
+          from PIL import Image, ImageDraw, ImageFont
+          print('Pillow version:', PIL.__version__)
+          print('raqm available:', PIL.features.check('raqm'))
+          text = 'अहम सबूत बरामद किए हैं और मास्टरमाइंड ने सीक्रेट ग्रुप बनाया था'
+          for name, path in [('kalam','fonts_hindi/Kalam-Light.ttf'), ('eczar','fonts_hindi/Eczar-Regular.ttf')]:
+              img = Image.new('RGB', (1000,150), 'white')
+              draw = ImageDraw.Draw(img)
+              try:
+                  font = ImageFont.truetype(path, 40, layout_engine=ImageFont.Layout.RAQM)
+              except Exception as e:
+                  print(name, 'raqm load failed:', e)
+                  font = ImageFont.truetype(path, 40)
+              draw.text((10,50), text, font=font, fill='black')
+              img.save(f'font_test_{name}.png')
+              print('saved', name)
+          "
+      - name: Upload rendered test images
+        uses: actions/upload-artifact@v4
+        with:
+          name: hindi-font-test
+          path: font_test_*.png
