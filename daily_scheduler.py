@@ -243,6 +243,7 @@ def _publish_schedule_skeleton(today_str: str, planned_en: list, planned_hi: lis
                 "planned_time_hi": t_hi.isoformat(),
                 "image_urls": [], "caption": "", "stories": [],
                 "image_urls_hi": [], "caption_hi": [],
+                "posted": False, "posted_hi": False,
             }
             for i, (t_en, t_hi) in enumerate(zip(planned_en, planned_hi))
         ],
@@ -285,6 +286,7 @@ def _sync_slots_skeleton(state: dict):
                     "index": i, "planned_time": iso_en, "planned_time_hi": iso_hi,
                     "image_urls": [], "caption": "", "stories": [],
                     "image_urls_hi": [], "caption_hi": "",
+                    "posted": False, "posted_hi": False,
                 })
         slots_state["slots"] = new_slots
         save_state(SLOTS_KEY, slots_state)
@@ -530,6 +532,32 @@ def _get_prebuilt_slot(due_index: int):
     return None
 
 
+def _mark_slot_posted_in_skeleton(index: int, lang: str):
+    """
+    Writes the real posted/posted_hi flag into app_state[SLOTS_KEY] (the
+    PWA's daily_slots display) for one slot/language, the moment that
+    slot is CONFIRMED posted. Previously daily_slots never carried a
+    posted flag at all - the PWA had to guess status purely from
+    planned_time vs. the clock, which is why a slot whose time had
+    simply passed (whether or not it actually posted) showed as
+    "posted" in the app. Best-effort: failure here never blocks
+    scheduler_state (the source of truth for auto-posting logic) from
+    being saved - it just means the app's display lags until the next
+    successful sync.
+    """
+    try:
+        slots_state = get_state(SLOTS_KEY, default={})
+        posted_field = "posted" if lang == "en" else "posted_hi"
+        for slot in slots_state.get("slots", []):
+            if slot.get("index") == index:
+                slot[posted_field] = True
+                break
+        save_state(SLOTS_KEY, slots_state)
+    except Exception as e:
+        print(f"[{now_ist().isoformat()}] Failed to mark slot #{index + 1} ({lang}) posted "
+              f"in the daily_slots skeleton (non-fatal - app display may lag): {e}")
+
+
 def _publish_prebuilt_slot(slot: dict, lang: str) -> bool:
     """
     Publishes a slot's already-built content for ONE language (images
@@ -609,6 +637,7 @@ def _check_manual_slot(state: dict, index: int, lang: str):
         state[posted_key][index] = True
         state[f"last_post_time{'' if lang == 'en' else '_hi'}"] = now_ist().isoformat()
         _save_state_remote(state)
+        _mark_slot_posted_in_skeleton(index, lang)
     else:
         print(f"  -> slot #{index + 1} ({lang}) is flagged Manual and still overdue - "
               f"no matching post on the feed yet, leaving it pending.")
@@ -702,6 +731,7 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
 
     state[posted_key][due_index] = True
     state[last_post_key] = now_ist().isoformat()
+    _mark_slot_posted_in_skeleton(due_index, lang)
     return True
 
 
