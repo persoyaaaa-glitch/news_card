@@ -9,6 +9,8 @@ Three jobs:
 2. Host each generated card image in Supabase Storage so we have a
    public URL to hand Instagram's Graph API (it requires image_url,
    not a raw file upload).
+3. Read/write the app_state key-value table and the schedule_overrides /
+   slot_overrides tables the companion PWA writes to.
 """
 
 import difflib
@@ -26,6 +28,11 @@ STORAGE_BUCKET = os.environ.get("SUPABASE_STORAGE_BUCKET", "news-cards")
 
 _DEDUP_LOOKBACK_DAYS = 60
 _TITLE_SIMILARITY_THRESHOLD = 0.82
+
+# Maps a language key to the slot_overrides column that holds its manual
+# flag, added by migration_hi_manual_flag.sql (which renamed the
+# original single `manual` column to `manual_en` and added `manual_hi`).
+_MANUAL_COLUMN_BY_LANG = {"en": "manual_en", "hi": "manual_hi"}
 
 _client: Client = None
 
@@ -128,25 +135,50 @@ def save_state(key: str, value):
     }).execute()
 
 
-def get_manual_slot_indices(slot_date: str) -> set:
+def get_manual_slot_indices(slot_date: str, lang: str = "en") -> set:
     """
-    Slot indices the PWA has flagged as 'I'm posting this one myself'
-    for the given date (see slot_overrides table / supabase_app_additions.sql).
+    Slot indices the PWA has flagged as 'I'm posting this one myself',
+    for the given date AND language (see slot_overrides table /
+    migration_hi_manual_flag.sql, which split the original single
+    `manual` column into `manual_en` and `manual_hi`).
+
+    Two things changed from the original single-language version:
+    1. Added `lang` ("en" or "hi", defaults to "en" so any old caller
+       that doesn't pass it keeps working) to read the right column.
+    2. Now actually filters on that column's value (`.eq(column, True)`).
+       The original version selected slot_index for every row that
+       existed in slot_overrides for the date, full stop - it never
+       checked whether `manual` was true or false, so a row explicitly
+       set to false would still have been treated as manual. Filtering
+       on the value is the correct behavior and is what daily_scheduler.py
+       has always assumed this function does.
 
     Returns an empty set - i.e. "no manual slots" - if the query fails
-    for any reason (table missing, RLS issue, transient network error).
-    This is called unconditionally on EVERY check_once() run, so it must
-    never take the whole scheduler down; failing "no manual overrides"
-    is always safe (worst case a slot that should've been manual gets
-    auto-posted instead of skipped, which is far better than the entire
-    day's posting silently stopping).
+    for any reason (table/column missing, RLS issue, transient network
+    error) or if `lang` isn't recognized. This is called unconditionally
+    on EVERY check_once() run, so it must never take the whole scheduler
+    down; failing "no manual overrides" is always safe (worst case a
+    slot that should've been manual gets auto-posted instead of skipped,
+    which is far better than the entire day's posting silently stopping).
     """
+    column = _MANUAL_COLUMN_BY_LANG.get(lang)
+    if column is None:
+        print(f"[supabase_client] get_manual_slot_indices got unknown lang={lang!r}, "
+              f"treating as 'no manual slots'")
+        return set()
     try:
         client = get_client()
-        resp = client.table("slot_overrides").select("slot_index").eq("slot_date", slot_date).execute()
+        resp = (
+            client.table("slot_overrides")
+            .select("slot_index")
+            .eq("slot_date", slot_date)
+            .eq(column, True)
+            .execute()
+        )
         return {row["slot_index"] for row in resp.data}
     except Exception as e:
-        print(f"[supabase_client] get_manual_slot_indices failed, treating as 'no manual slots': {e}")
+        print(f"[supabase_client] get_manual_slot_indices failed for lang={lang}, "
+              f"treating as 'no manual slots': {e}")
         return set()
 
 
@@ -155,10 +187,11 @@ def get_schedule_override(slot_date: str):
     Reads the PWA's requested schedule change for `slot_date` (see
     schedule_overrides table / supabase_app_additions.sql) - target post
     count for the day and/or specific times for individual not-yet-posted
-    slots. Returns None if nothing's been requested, or if the table
-    doesn't exist yet (e.g. supabase_app_additions.sql hasn't been re-run
-    since this feature was added) - daily_scheduler.py treats that exactly
-    like "no override," so this is safe to call before the SQL migration.
+    slots (now per language - see daily_scheduler.py's _apply_time_edits
+    for the {"0": {"en": "...", "hi": "..."}} shape). Returns None if
+    nothing's been requested, or if the table doesn't exist yet -
+    daily_scheduler.py treats that exactly like "no override," so this
+    is safe to call before any SQL migration.
     """
     try:
         client = get_client()
