@@ -11,7 +11,7 @@ import textwrap
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 CANVAS_W, CANVAS_H = 1080, 1350       # Instagram portrait
-IMAGE_H = 660                          # photo area height
+IMAGE_H = 788                          # photo area height (hook slide, 7:5 photo:panel split)
 LOGO_SIZE = 140                        # brand logo badge, bottom-right corner
 PANEL_H = CANVAS_H - IMAGE_H           # text panel height
 
