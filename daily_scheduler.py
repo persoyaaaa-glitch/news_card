@@ -530,7 +530,7 @@ def _get_prebuilt_slot(due_index: int):
     return None
 
 
-def _publish_prebuilt_slot(slot: dict, lang: str):
+def _publish_prebuilt_slot(slot: dict, lang: str) -> bool:
     """
     Publishes a slot's already-built content for ONE language (images
     already uploaded, stories already reserved in Supabase by
@@ -540,8 +540,15 @@ def _publish_prebuilt_slot(slot: dict, lang: str):
     language's account.
 
     lang="en" reads image_urls/caption and posts with account="en".
-    lang="hi" reads image_urls_hi/caption_hi and posts with account="hi" -
-    this is the code path that was missing entirely before this fix.
+    lang="hi" reads image_urls_hi/caption_hi and posts with account="hi".
+
+    Returns True only if the post is CONFIRMED to have actually gone
+    live - either the API call itself succeeded, or it errored but the
+    feed-check below found a matching post anyway. Returns False for
+    every other case (content not ready, genuine publish failure) so
+    the caller (_fire_due_slot_for_lang) knows not to mark the slot
+    posted - previously this returned nothing and the caller marked it
+    posted unconditionally regardless of what happened here.
     """
     from instagram_publish import (
         post_carousel_to_instagram, post_to_instagram, find_recent_matching_post,
@@ -554,7 +561,7 @@ def _publish_prebuilt_slot(slot: dict, lang: str):
         print(f"  -> slot has no {lang} content yet (content_pregen.py may still be "
               f"working on it, or this language failed to build) - skipping this run, "
               f"will retry next check.")
-        return
+        return False
 
     print(f"  -> publishing pre-built {lang} content ({len(slot.get('stories', []))} stories, "
           f"{len(image_urls)} images)...")
@@ -564,6 +571,7 @@ def _publish_prebuilt_slot(slot: dict, lang: str):
         else:
             media_id = post_to_instagram(image_urls[0], caption, account=lang)
         print(f"  -> posted ({lang}). Media ID: {media_id}")
+        return True
     except Exception as e:
         print(f"  -> Instagram publish failed ({lang}): {e}")
         print(f"  -> checking the {lang} account's recent media in case it actually posted "
@@ -571,10 +579,12 @@ def _publish_prebuilt_slot(slot: dict, lang: str):
         media_id = find_recent_matching_post(caption, account=lang)
         if media_id:
             print(f"  -> confirmed: {lang} post {media_id} actually went live despite the error.")
+            return True
         else:
-            print(f"  -> confirmed: the {lang} post genuinely did not go out. The stories in "
-                  f"this slot were already reserved at pre-generation time, so they won't be "
-                  f"retried automatically - check the app/logs and post manually if needed.")
+            print(f"  -> confirmed: the {lang} post genuinely did not go out. The slot is "
+                  f"left un-posted (not marked done) so this same pre-built content gets "
+                  f"retried on the next check instead of silently vanishing.")
+            return False
 
 
 def _check_manual_slot(state: dict, index: int, lang: str):
@@ -650,22 +660,45 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
           f"#{due_index + 1}/{len(state[times_key])} "
           f"(planned {planned_dt.strftime('%H:%M')} IST)")
 
+    # posted_ok tracks whether this language's post is CONFIRMED to have
+    # actually gone out - only then is it safe to mark the slot posted.
+    # Previously this whole block ignored what happened here and marked
+    # posted=True unconditionally afterward, so a crashed/failed publish
+    # attempt (including the account=lang TypeError below, which fired
+    # on every single use of this fallback branch since run_combined()
+    # never accepted that argument) still got silently recorded as a
+    # successful post.
+    posted_ok = False
     try:
         prebuilt = _get_prebuilt_slot(due_index)
         if prebuilt:
-            _publish_prebuilt_slot(prebuilt, lang)
+            posted_ok = _publish_prebuilt_slot(prebuilt, lang)
         else:
             print(f"  -> no pre-built content found for this slot - building fresh now ({lang}).")
-            hourly_run.run_combined(
+            # NOTE: run_combined() has no per-language selector - it always
+            # attempts an English post (and a Hindi one too, if the
+            # POST_HINDI_PAGE env var is on), regardless of which `lang`
+            # this fallback was triggered for. That's a pre-existing
+            # limitation of this rarely-used path (content_pregen.py
+            # builds both languages together, so both should normally be
+            # prebuilt by the time either is due) - flagging it here
+            # rather than silently working around it.
+            result = hourly_run.run_combined(
                 story_count=STORIES_PER_POST,
                 images_per_story=IMAGES_PER_STORY,
                 apply_jitter=False,
-                account=lang,
             )
+            posted_ok = bool(result.get("media_id_hi") if lang == "hi" else result.get("media_id"))
     except Exception:
-        print(f"Post attempt failed ({lang}) - will not retry this slot, "
-              f"continuing with the rest of today's schedule.")
+        print(f"Post attempt failed ({lang}) - will retry on a later check "
+              f"instead of being marked posted.")
         traceback.print_exc()
+        posted_ok = False
+
+    if not posted_ok:
+        print(f"  -> {lang} post for slot #{due_index + 1} did not actually go out - "
+              f"leaving it un-posted so it's picked up again on the next check.")
+        return False
 
     state[posted_key][due_index] = True
     state[last_post_key] = now_ist().isoformat()
