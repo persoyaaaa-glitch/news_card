@@ -236,6 +236,92 @@ def _make_linear_gradient(width: int, height: int, hex_stops: list) -> Image.Ima
     return img.resize((width, height))
 
 
+def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
+    """
+    Finds `highlight` as a case-insensitive substring of exactly one of the
+    already-wrapped headline lines. Returns a dict with everything needed
+    to draw both the marker box and the overlaid solid-ink text (line
+    index, this line's centered x-start, the highlighted glyph's pixel
+    x-offset/width within it, and the exact original-case slice actually
+    being highlighted) - or None if not found in any single line (e.g.
+    word-wrap happened to split the phrase across two lines).
+    """
+    if not highlight:
+        return None
+    highlight_norm = highlight.strip().lower()
+    if not highlight_norm:
+        return None
+
+    for i, line in enumerate(wrapped):
+        idx = line.lower().find(highlight_norm)
+        if idx == -1:
+            continue
+
+        line_bbox = draw.textbbox((0, 0), line, font=font)
+        line_w = line_bbox[2] - line_bbox[0]
+
+        prefix = line[:idx]
+        prefix_w = 0
+        if prefix:
+            prefix_bbox = draw.textbbox((0, 0), prefix, font=font)
+            prefix_w = prefix_bbox[2] - prefix_bbox[0]
+
+        # Use the ORIGINAL-case slice from the line (not `highlight` itself)
+        # so glyph widths/rendering match exactly what's actually drawn.
+        exact_slice = line[idx: idx + len(highlight_norm)]
+        hl_bbox = draw.textbbox((0, 0), exact_slice, font=font)
+        hl_w = hl_bbox[2] - hl_bbox[0]
+
+        return {
+            "line_index": i, "line_w": line_w,
+            "prefix_w": prefix_w, "hl_w": hl_w, "exact_slice": exact_slice,
+        }
+    return None
+
+
+def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, text_y: int,
+                         pad_x: int, max_text_width: int, box_color: tuple):
+    """
+    Paints a rounded "highlighter marker" box on the canvas at the
+    position described by `bounds` (from _find_highlight_bounds), filled
+    with `box_color` (solid, no transparency - meant to be the headline's
+    own gradient color, e.g. via _hex_to_rgb(theme["gradient"][0])). Must
+    be called BEFORE _draw_gradient_text, since that function pastes
+    gradient text using a per-glyph mask - anything already on the canvas
+    behind the glyphs (this box) stays visible in the gaps around/behind
+    the letters.
+    """
+    i = bounds["line_index"]
+    line_x = pad_x + (max_text_width - bounds["line_w"]) // 2  # matches _draw_gradient_text's centering
+    h_pad, v_pad = 10, 6
+    box = [
+        line_x + bounds["prefix_w"] - h_pad,
+        text_y + i * line_height + v_pad,
+        line_x + bounds["prefix_w"] + bounds["hl_w"] + h_pad,
+        text_y + (i + 1) * line_height - v_pad,
+    ]
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle(box, radius=10, fill=box_color)
+
+
+def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: int, text_y: int,
+                         pad_x: int, max_text_width: int):
+    """
+    Redraws just the highlighted phrase in solid black, on top of the
+    (already-drawn) gradient headline text - the box behind it uses the
+    headline's own color, so the phrase itself needs to contrast against
+    that, not blend into it. Must be called AFTER _draw_gradient_text so
+    this ink isn't itself overpainted.
+    """
+    i = bounds["line_index"]
+    line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
+    draw = ImageDraw.Draw(canvas)
+    draw.text(
+        (line_x + bounds["prefix_w"], text_y + i * line_height),
+        bounds["exact_slice"], font=font, fill=(0, 0, 0),
+    )
+
+
 def _draw_gradient_text(canvas: Image.Image, xy, lines, font, line_height, hex_stops, block_width=None, center=False):
     """
     Renders wrapped text lines filled with a vertical gradient (sampled
@@ -332,6 +418,7 @@ def build_news_card(
     headline_font: str = None,
     breaking: bool = False,
     grayscale: bool = False,
+    highlight: str = None,
 ):
     theme = theme or random.choice(HEADLINE_THEMES)
     # Hook headline font: defaults to the same font as the description slide
@@ -493,8 +580,27 @@ def build_news_card(
     # Grayscale cards get a plain white/light-gray headline instead of
     # the day's theme color, keeping the whole card black-and-white.
     gradient_stops = ["#ffffff", "#e0e0e0", "#ffffff", "#f2f2f2", "#ffffff"] if grayscale else theme["gradient"]
+
+    # Highlighter-marker box + solid-black ink overlay behind/over the
+    # AI-picked phrase, if any. Skipped for grayscale/sensitive cards - see
+    # docstring. The box uses the headline's own color (theme["gradient"][0],
+    # its dominant/anchor stop - repeats at the start/middle/end of every
+    # theme's gradient, see HEADLINE_THEMES) rather than a fixed color, so
+    # it always matches that card's headline. It's drawn before the
+    # gradient text (so it shows through the gaps around the glyphs); the
+    # black ink overlay is redrawn after (so the highlighted phrase itself
+    # reads as solid black text on its own-color box, not blended into the
+    # gradient headline color).
+    highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
+    if highlight_bounds:
+        box_color = _hex_to_rgb(theme["gradient"][0])
+        _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color)
+
     _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_height, gradient_stops,
                          block_width=max_text_width, center=True)
+
+    if highlight_bounds:
+        _draw_highlight_ink(canvas, highlight_bounds, headline_font, line_height, text_y, pad_x, max_text_width)
 
     # --- source / meta line at the bottom of the panel, and the brand logo ---
     # Logo sits low, close to the true bottom edge (same margin as pad_x/pad_y
@@ -656,6 +762,7 @@ def build_carousel(
     grayscale: bool = False,
     theme: dict = None,
     breaking: bool = False,
+    highlight: str = None,
 ) -> list:
     """
     Builds a full carousel: slide 1 is the eye-catching hook (photo +
@@ -680,6 +787,13 @@ def build_carousel(
     its category pill. Only pass True for stories actually flagged as
     breaking news - this should never appear on routine stories.
 
+    highlight: an exact substring of `headline` to draw a highlighter-
+    marker box behind on the hook slide (slide 1 only - info slides
+    don't get one). Pass None to skip. Silently skipped (no crash) if
+    it isn't found verbatim in `headline`, or if grayscale=True (a
+    bright marker box would clash with the deliberately sober look
+    grayscale is used for on sensitive stories).
+
     Returns the list of output file paths, in post order.
     """
     theme = theme or random.choice(HEADLINE_THEMES)
@@ -699,6 +813,7 @@ def build_carousel(
         theme=theme,
         breaking=breaking,
         grayscale=grayscale,
+        highlight=highlight,
     )
     paths.append(hook_path)
 

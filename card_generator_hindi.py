@@ -343,6 +343,83 @@ def _make_linear_gradient(width: int, height: int, hex_stops: list) -> Image.Ima
     return img.resize((width, height))
 
 
+def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
+    """
+    Same approach as card_generator.py's version: finds `highlight` as a
+    case-insensitive substring of exactly one wrapped line, and returns the
+    geometry needed to draw both the marker box and the solid-ink overlay.
+    Returns None if not found in any single line.
+
+    NOTE (Devanagari shaping): matra reordering during OpenType shaping
+    means this logical-string-position measurement can be very slightly
+    off from true glyph edges for a phrase boundary that falls mid-
+    conjunct. Fine for the common case (boundaries on clean word breaks);
+    worth a visual spot-check if a box looks shifted.
+    """
+    if not highlight:
+        return None
+    highlight_norm = highlight.strip().lower()
+    if not highlight_norm:
+        return None
+
+    for i, line in enumerate(wrapped):
+        idx = line.lower().find(highlight_norm)
+        if idx == -1:
+            continue
+
+        line_bbox = draw.textbbox((0, 0), line, font=font)
+        line_w = line_bbox[2] - line_bbox[0]
+
+        prefix = line[:idx]
+        prefix_w = 0
+        if prefix:
+            prefix_bbox = draw.textbbox((0, 0), prefix, font=font)
+            prefix_w = prefix_bbox[2] - prefix_bbox[0]
+
+        exact_slice = line[idx: idx + len(highlight_norm)]
+        hl_bbox = draw.textbbox((0, 0), exact_slice, font=font)
+        hl_w = hl_bbox[2] - hl_bbox[0]
+
+        return {
+            "line_index": i, "line_w": line_w,
+            "prefix_w": prefix_w, "hl_w": hl_w, "exact_slice": exact_slice,
+        }
+    return None
+
+
+def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, text_y: int,
+                         pad_x: int, max_text_width: int, box_color: tuple):
+    """Paints the highlighter-marker box, filled with box_color (the
+    headline's own gradient color). Must run BEFORE _draw_gradient_text."""
+    i = bounds["line_index"]
+    line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
+    h_pad, v_pad = 10, 6
+    box = [
+        line_x + bounds["prefix_w"] - h_pad,
+        text_y + i * line_height + v_pad,
+        line_x + bounds["prefix_w"] + bounds["hl_w"] + h_pad,
+        text_y + (i + 1) * line_height - v_pad,
+    ]
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle(box, radius=10, fill=box_color)
+
+
+def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: int, text_y: int,
+                         pad_x: int, max_text_width: int):
+    """
+    Redraws the highlighted phrase in solid black over the gradient text,
+    so it contrasts against the box (which uses the headline's own color).
+    Must run AFTER _draw_gradient_text.
+    """
+    i = bounds["line_index"]
+    line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
+    draw = ImageDraw.Draw(canvas)
+    draw.text(
+        (line_x + bounds["prefix_w"], text_y + i * line_height),
+        bounds["exact_slice"], font=font, fill=(0, 0, 0),
+    )
+
+
 def _draw_gradient_text(canvas: Image.Image, xy, lines, font, line_height, hex_stops, block_width=None, center=False):
     """
     Renders wrapped text lines filled with a vertical gradient (sampled
@@ -445,6 +522,7 @@ def build_news_card(
     breaking_label: str = BREAKING_LABEL_HI,
     grayscale: bool = False,
     font_family: str = None,
+    highlight: str = None,
 ):
     """Same layout as the English generator's build_news_card, but all
     copy is expected to be Hindi. `tag` may be a canonical English key
@@ -615,8 +693,17 @@ def build_news_card(
     # Grayscale cards get a plain white/light-gray headline instead of
     # the day's theme color, keeping the whole card black-and-white.
     gradient_stops = ["#ffffff", "#e0e0e0", "#ffffff", "#f2f2f2", "#ffffff"] if grayscale else theme["gradient"]
+
+    highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
+    if highlight_bounds:
+        box_color = _hex_to_rgb(theme["gradient"][0])
+        _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color)
+
     _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_height, gradient_stops,
                          block_width=max_text_width, center=True)
+
+    if highlight_bounds:
+        _draw_highlight_ink(canvas, highlight_bounds, headline_font, line_height, text_y, pad_x, max_text_width)
 
     # --- source / meta line at the bottom of the panel, and the brand logo ---
     meta_font = _load_font(_font_path(font_family, "meta"), 26)
@@ -789,6 +876,7 @@ def build_carousel(
     breaking: bool = False,
     breaking_label: str = BREAKING_LABEL_HI,
     font_family: str = None,
+    highlight: str = None,
 ) -> list:
     """
     Builds a full Hindi carousel: slide 1 is the eye-catching hook (photo +
@@ -819,6 +907,17 @@ def build_carousel(
     breaking_label) next to its category pill. Only pass True for stories
     actually flagged as breaking news.
 
+    highlight: an exact substring of `headline` to draw a highlighter-
+    marker box behind on the hook slide. Pass None to skip. Silently
+    skipped if not found verbatim in `headline`, or if grayscale=True.
+    NOTE: Devanagari text can involve matra reordering during OpenType
+    shaping (see this file's top docstring), so for a highlight phrase
+    that starts or ends mid-conjunct the box's pixel position may be
+    very slightly off from the true glyph edges - it's measured from
+    logical string position, not shaped glyph position (Pillow doesn't
+    expose the latter). Fine for the common case (phrase boundaries on
+    clean word breaks), worth a visual spot-check if it looks off.
+
     Returns the list of output file paths, in post order.
     """
     theme = theme or random.choice(HEADLINE_THEMES)
@@ -841,6 +940,7 @@ def build_carousel(
         breaking_label=breaking_label,
         grayscale=grayscale,
         font_family=font_family,
+        highlight=highlight,
     )
     paths.append(hook_path)
 
