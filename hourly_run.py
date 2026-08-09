@@ -276,11 +276,18 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
     # fails or there isn't enough real article text to ground it in.
     display_headline = title
     detail_text = None
+    highlight_text = None
     slide_texts = []
     if len(paragraphs) >= 2:
-        ai_hook, ai_detail = generate_hook_and_detail(title, raw_article_text, source, sensitive=sensitive)
+        ai_hook, ai_detail, ai_highlight = generate_hook_and_detail(title, raw_article_text, source, sensitive=sensitive)
         display_headline = ai_hook or title
         detail_text = ai_detail
+        # ai_highlight was already validated (in ai_text.py) as an exact
+        # substring of ai_hook - but if ai_hook itself got rejected and we
+        # fell back to the raw scraped `title` above, that guarantee no
+        # longer holds against `display_headline`, so re-check here too.
+        if ai_highlight and ai_hook and display_headline == ai_hook:
+            highlight_text = ai_highlight
         if ai_detail:
             slide_texts = [ai_detail]
         else:
@@ -303,6 +310,7 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
         breaking=is_breaking,
         theme=theme,
         grayscale=sensitive,
+        highlight=highlight_text,
     )
 
     caption = ""
@@ -322,6 +330,7 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
         "slide_paths": slide_paths,
         "caption": caption,
         "detail_text": detail_text,
+        "highlight_text": highlight_text,  # exact substring of display_headline to mark, or None
         "slide_texts": slide_texts,  # raw list backing slide_paths[1:] - kept for the Hindi translation pass (_build_hindi_slides)
         # Diagnostics, for QA/trial runs to audit at a glance:
         "used_real_image": used_real_image,
@@ -364,7 +373,9 @@ def _build_hindi_slides(result: dict, theme: dict, out_dir: str = CARD_DIR, tmp_
     # translate off of (title, first body chunk) as the grounding pair;
     # any extra body chunks beyond the first are translated individually
     # below with the plain single-string translator.
-    headline_hi, detail_hi = translate_story_to_hindi(title, first_body_en, sensitive=sensitive)
+    headline_hi, detail_hi, highlight_hi = translate_story_to_hindi(
+        title, first_body_en, sensitive=sensitive, highlight_en=result.get("highlight_text"),
+    )
     if not headline_hi:
         print(f"  -> [hi] translation failed for '{title[:50]}...' - skipping Hindi post for this story")
         return None
@@ -397,9 +408,10 @@ def _build_hindi_slides(result: dict, theme: dict, out_dir: str = CARD_DIR, tmp_
         theme=theme,
         grayscale=sensitive,
         font_family=_next_font_family(),
+        highlight=highlight_hi,
     )
 
-    return {"slide_paths": slide_paths_hi, "headline_hi": headline_hi, "detail_hi": detail_hi}
+    return {"slide_paths": slide_paths_hi, "headline_hi": headline_hi, "detail_hi": detail_hi, "highlight_hi": highlight_hi}
 
 
 def run(max_attempts: int = 30, apply_jitter: bool = True, dry_run: bool = False, include_global: bool = True):

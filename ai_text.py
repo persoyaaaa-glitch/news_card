@@ -71,9 +71,11 @@ Write two pieces of copy, grounded ONLY in the article text above - do not add f
 1. "hook": A short, punchy, attention-grabbing line for the first slide of the card. Maximum 12 words. This is the eye-catching headline that stops someone scrolling - clear and specific, not vague clickbait ("You won't believe..." is NOT allowed). It should tell the reader what actually happened.
 
 2. "detail": A crisp, informative summary of the story for the second slide, 2-3 sentences, roughly 40-60 words. This is the "here's what's actually going on" explainer - factual, clear, no fluff, no clickbait, written like a good news brief.
+
+3. "highlight": The single most scroll-stopping word or short phrase (1-3 words) taken VERBATIM from the "hook" text you just wrote - it must be an exact substring of "hook", same spelling and capitalization. Pick whatever carries the most punch: a number, a proper noun, a dramatic verb, or the sharpest phrase. This word/phrase will get a highlighter-marker box behind it on the card, so it should be the thing a reader's eye should land on first, not a filler word like "the" or "a".
 {sensitive_instruction}
 Respond with ONLY a JSON object, no markdown fences, no preamble, in exactly this shape:
-{{"hook": "...", "detail": "..."}}
+{{"hook": "...", "detail": "...", "highlight": "..."}}
 """
 
 # Extra instruction spliced into the prompt above ONLY for stories flagged
@@ -208,12 +210,35 @@ def _call_gemini(prompt: str, timeout: int = 30, max_output_tokens: int = 4096,
     return None
 
 
+def _validate_highlight(highlight: str | None, hook: str | None) -> str | None:
+    """
+    The card renderer needs to find `highlight` as an exact substring of
+    `hook` to know which pixels to draw the marker box behind. Gemini
+    usually returns it verbatim, but occasionally paraphrases or changes
+    case - in that case a highlight the renderer can't locate is worse
+    than no highlight at all (silently drops the box), so we verify the
+    match here (case-insensitively) and drop anything that doesn't line
+    up rather than pass bad data downstream.
+    """
+    if not highlight or not hook:
+        return None
+    highlight = highlight.strip()
+    if not highlight:
+        return None
+    if highlight.lower() not in hook.lower():
+        print(f"[ai_text] highlight {highlight!r} not found verbatim in hook {hook!r} - dropping")
+        return None
+    return highlight
+
+
 def generate_hook_and_detail(headline: str, article_text: str, source: str, timeout: int = 30, sensitive: bool = False) -> tuple:
     """
-    Calls Gemini with the real article text and asks for a hook line +
-    detail summary. Returns (hook_text, detail_text) - either element
-    may be None if generation failed, so callers should fall back to
-    the raw scraped headline/paragraph text in that case.
+    Calls Gemini with the real article text and asks for a hook line,
+    detail summary, and highlight phrase. Returns (hook_text,
+    detail_text, highlight_text) - any element may be None if
+    generation failed or (for highlight) didn't validate, so callers
+    should fall back to the raw scraped headline/paragraph text and/or
+    skip the highlight box in that case.
 
     sensitive: pass True for stories involving death, sexual assault,
     murder, or similarly serious/tragic subjects (see hourly_run.
@@ -221,7 +246,7 @@ def generate_hook_and_detail(headline: str, article_text: str, source: str, time
     instruction for a plain, factual tone instead.
     """
     if not article_text:
-        return None, None
+        return None, None, None
 
     prompt = PROMPT_TEMPLATE.format(
         headline=headline,
@@ -232,16 +257,17 @@ def generate_hook_and_detail(headline: str, article_text: str, source: str, time
 
     raw_text = _call_gemini(prompt, timeout=timeout)
     if not raw_text:
-        return None, None
+        return None, None, None
 
     parsed = _extract_json(raw_text)
     if not parsed:
         print(f"[ai_text] could not parse Gemini response as JSON: {raw_text[:200]!r}")
-        return None, None
+        return None, None, None
 
     hook = parsed.get("hook", "").strip() or None
     detail = parsed.get("detail", "").strip() or None
-    return hook, detail
+    highlight = _validate_highlight(parsed.get("highlight", "").strip() or None, hook)
+    return hook, detail, highlight
 
 
 CAPTION_PROMPT_TEMPLATE = """You are writing the Instagram caption for a real news carousel post on a news account.
@@ -440,13 +466,23 @@ Keep all numbers, dates, and facts exactly as given. Transliterate proper nouns 
 {sensitive_instruction}
 HEADLINE (English, max ~12 words): {headline}
 DETAIL (English, 2-3 sentences): {detail}
-
+{highlight_instruction}
 Respond with ONLY a JSON object, no markdown fences, no preamble, in exactly this shape:
-{{"headline": "...", "detail": "..."}}
+{{"headline": "...", "detail": "..."{highlight_json_field}}}
+"""
+
+# Spliced in only when the English hook had a validated highlight phrase,
+# so we ask Gemini to point out the equivalent Devanagari phrase in its
+# OWN translated "headline" - the English highlight substring almost
+# never survives translation intact (different script, different word
+# order), so we can't just reuse it; we need a fresh verbatim match
+# against whatever Hindi text Gemini actually writes.
+HINDI_HIGHLIGHT_INSTRUCTION_TEMPLATE = """
+The English version highlights this phrase for emphasis: "{highlight_en}". In your Hindi HEADLINE above, mark the equivalent word or short phrase (1-3 words) that should get the same highlighter-box emphasis - it must be an EXACT substring of the Hindi "headline" you write, same script and spelling.
 """
 
 
-def translate_story_to_hindi(headline: str, detail_text: str, timeout: int = 30, sensitive: bool = False) -> tuple:
+def translate_story_to_hindi(headline: str, detail_text: str, timeout: int = 30, sensitive: bool = False, highlight_en: str | None = None) -> tuple:
     """
     Translates an already-generated English hook headline + detail
     summary into natural Hindi news phrasing, for feeding straight into
@@ -459,31 +495,42 @@ def translate_story_to_hindi(headline: str, detail_text: str, timeout: int = 30,
     phrasing plain and factual, matching the English version's tone
     (see hourly_run.is_sensitive_story / SENSITIVE_INSTRUCTION).
 
-    Returns (headline_hi, detail_hi) - either may be None if
-    translation/parsing failed, so callers should skip building the
-    Hindi post for that story rather than posting an untranslated or
-    partially-translated card.
+    highlight_en: the validated English highlight substring (from
+    generate_hook_and_detail), if any. When given, asks Gemini to also
+    mark the equivalent Devanagari phrase in its translated headline -
+    the English substring itself won't match post-translation, so this
+    is a fresh pick grounded in the Hindi text actually written.
+
+    Returns (headline_hi, detail_hi, highlight_hi) - headline_hi/
+    detail_hi may be None if translation/parsing failed, so callers
+    should skip building the Hindi post for that story rather than
+    posting an untranslated or partially-translated card. highlight_hi
+    is None whenever highlight_en wasn't given, or if the returned
+    phrase didn't validate as an exact substring of headline_hi.
     """
     if not headline:
-        return None, None
+        return None, None, None
 
     prompt = HINDI_STORY_TRANSLATE_PROMPT_TEMPLATE.format(
         headline=headline,
         detail=detail_text or "",
         sensitive_instruction=SENSITIVE_INSTRUCTION if sensitive else "",
+        highlight_instruction=HINDI_HIGHLIGHT_INSTRUCTION_TEMPLATE.format(highlight_en=highlight_en) if highlight_en else "",
+        highlight_json_field=', "highlight": "..."' if highlight_en else "",
     )
     raw_text = _call_gemini(prompt, timeout=timeout)
     if not raw_text:
-        return None, None
+        return None, None, None
 
     parsed = _extract_json(raw_text)
     if not parsed:
         print(f"[ai_text] could not parse Hindi story translation as JSON: {raw_text[:200]!r}")
-        return None, None
+        return None, None, None
 
     headline_hi = (parsed.get("headline") or "").strip() or None
     detail_hi = (parsed.get("detail") or "").strip() or None
-    return headline_hi, detail_hi
+    highlight_hi = _validate_highlight((parsed.get("highlight") or "").strip() or None, headline_hi) if highlight_en else None
+    return headline_hi, detail_hi, highlight_hi
 
 
 SIMPLE_HINDI_TRANSLATE_PROMPT_TEMPLATE = """Translate the following English news text into natural, everyday Hindi (Devanagari script), the way an Indian Hindi news outlet would phrase it - not a stiff literal translation. Keep numbers, dates, and proper nouns accurate (transliterate people/places/organizations into Devanagari per common Hindi-news convention; keep widely-used acronyms like IPL/ISRO/GDP/AI in Roman script).
@@ -565,9 +612,10 @@ if __name__ == "__main__":
         "Industry groups welcomed the announcement but flagged concerns about grid capacity and the pace "
         "of transmission-line approvals, which have historically lagged behind generation targets."
     )
-    hook, detail = generate_hook_and_detail(sample_headline, sample_text, "Reuters")
+    hook, detail, highlight = generate_hook_and_detail(sample_headline, sample_text, "Reuters")
     print("HOOK:", hook)
     print("DETAIL:", detail)
+    print("HIGHLIGHT:", highlight)
 
     caption_result = generate_caption_and_hashtags(sample_headline, sample_text, "Reuters", tag="BUSINESS")
     if caption_result:

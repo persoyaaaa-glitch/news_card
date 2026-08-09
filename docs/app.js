@@ -427,7 +427,7 @@ function renderModalLang(lang) {
   if (!imageUrls.length && lang === "hi") {
     const p = document.createElement("p");
     p.className = "field-hint";
-    p.textContent = "Hindi translation didn't come through for this slot's stories - only the English post will go out.";
+    p.textContent = "This one's English-only for now - the Hindi version may still catch up on a later run.";
     scroller.appendChild(p);
   } else {
     imageUrls.forEach((url) => {

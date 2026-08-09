@@ -532,7 +532,7 @@ def _get_prebuilt_slot(due_index: int):
     return None
 
 
-def _mark_slot_posted_in_skeleton(index: int, lang: str):
+def _mark_slot_posted_in_skeleton(index: int, lang: str, content: dict | None = None):
     """
     Writes the real posted/posted_hi flag into app_state[SLOTS_KEY] (the
     PWA's daily_slots display) for one slot/language, the moment that
@@ -540,10 +540,17 @@ def _mark_slot_posted_in_skeleton(index: int, lang: str):
     posted flag at all - the PWA had to guess status purely from
     planned_time vs. the clock, which is why a slot whose time had
     simply passed (whether or not it actually posted) showed as
-    "posted" in the app. Best-effort: failure here never blocks
-    scheduler_state (the source of truth for auto-posting logic) from
-    being saved - it just means the app's display lags until the next
-    successful sync.
+    "posted" in the app.
+
+    If `content` is given - which happens when a slot was built fresh
+    at fire-time instead of using content_pregen's version - the actual
+    image_urls/caption/stories that were really posted get written back
+    too, so the PWA shows what actually went out instead of an earlier
+    failed/empty pregen snapshot for the same slot index.
+
+    Best-effort: failure here never blocks scheduler_state (the source
+    of truth for auto-posting logic) from being saved - it just means
+    the app's display lags until the next successful sync.
     """
     try:
         slots_state = get_state(SLOTS_KEY, default={})
@@ -551,6 +558,21 @@ def _mark_slot_posted_in_skeleton(index: int, lang: str):
         for slot in slots_state.get("slots", []):
             if slot.get("index") == index:
                 slot[posted_field] = True
+                if content:
+                    if lang == "en":
+                        if content.get("image_urls"):
+                            slot["image_urls"] = content["image_urls"]
+                        if content.get("caption"):
+                            slot["caption"] = content["caption"]
+                        if content.get("stories"):
+                            slot["stories"] = content["stories"]
+                    else:
+                        if content.get("image_urls_hi"):
+                            slot["image_urls_hi"] = content["image_urls_hi"]
+                        if content.get("caption_hi"):
+                            slot["caption_hi"] = content["caption_hi"]
+                        if content.get("stories") and not slot.get("stories"):
+                            slot["stories"] = content["stories"]
                 break
         save_state(SLOTS_KEY, slots_state)
     except Exception as e:
@@ -698,6 +720,7 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
     # never accepted that argument) still got silently recorded as a
     # successful post.
     posted_ok = False
+    fresh_content = None
     try:
         prebuilt = _get_prebuilt_slot(due_index)
         if prebuilt:
@@ -718,6 +741,13 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
                 apply_jitter=False,
             )
             posted_ok = bool(result.get("media_id_hi") if lang == "hi" else result.get("media_id"))
+            fresh_content = {
+                "image_urls": result.get("image_urls"),
+                "caption": result.get("caption"),
+                "image_urls_hi": result.get("image_urls_hi"),
+                "caption_hi": result.get("caption_hi"),
+                "stories": [{"title": r.get("title")} for r in result.get("results", []) if r.get("title")],
+            }
     except Exception:
         print(f"Post attempt failed ({lang}) - will retry on a later check "
               f"instead of being marked posted.")
@@ -731,7 +761,7 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
 
     state[posted_key][due_index] = True
     state[last_post_key] = now_ist().isoformat()
-    _mark_slot_posted_in_skeleton(due_index, lang)
+    _mark_slot_posted_in_skeleton(due_index, lang, content=fresh_content)
     return True
 
 
