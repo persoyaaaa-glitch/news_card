@@ -84,9 +84,11 @@ def _next_theme() -> dict:
 
 
 # Same rotation pattern as _next_theme() above, but for card_generator_hindi's
-# two font families ("kalam", "eczar") - persisted via Supabase (app_state key
-# "hindi_font_rotation") so consecutive Hindi posts strictly alternate
-# fonts instead of repeating one by chance.
+# font family choices - persisted via Supabase (app_state key
+# "hindi_font_rotation"). Kalam has been removed, so FONT_FAMILY_CHOICES is
+# now just ["eczar"] and this always resolves to "eczar" - kept in place
+# (rather than hardcoding "eczar" at the call site) so restoring a second
+# family later is a one-line change in card_generator_hindi.py.
 def _next_font_family() -> str:
     choices = card_generator_hindi.FONT_FAMILY_CHOICES
     state = get_state("hindi_font_rotation", default={"next_index": 0})

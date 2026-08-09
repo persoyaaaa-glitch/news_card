@@ -2,23 +2,20 @@
 card_generator_hindi.py
 Hindi (Devanagari) version of card_generator.py — same "news card" layout
 and logic (1080x1350 Instagram-portrait card, hook slide + info-slide
-carousel), but the headline/body/tag/source copy is Hindi and only two
-font families are used, ROTATING one-by-one across posts (never mixed
-within a single card — every text element on one card uses the same
-family, so the card reads as one consistent typographic choice):
+carousel), but the headline/body/tag/source copy is Hindi and only one
+font family is used (Kalam has been removed - it wasn't reading well
+on posted cards, so every Hindi card now renders in Eczar):
 
-  - Kalam                  -> handwritten-style Devanagari + Latin face.
-    Weights available: Light, Regular, Bold.
   - Eczar                  -> serif slab Devanagari + Latin face.
     Weights available: Regular, Medium, SemiBold, Bold, ExtraBold.
 
-Both families have full native Devanagari AND Latin glyph coverage, so
+Eczar has full native Devanagari AND Latin glyph coverage, so
 (unlike the old Inknut Antiqua / League Spartan setup) there's no
-per-string script detection needed anymore — whichever family is active
-for this card renders every string on it, Hindi or Latin alike.
+per-string script detection needed — it renders every string on the
+card, Hindi or Latin alike.
 
 Which family is "active" for a given card is passed in via the
-`font_family` param ("kalam" or "eczar") on build_news_card /
+`font_family` param ("eczar" - the only remaining choice) on build_news_card /
 build_info_slide / build_carousel. Callers that want strict one-by-one
 rotation across posts (e.g. hourly_run.py) should track that externally
 (see `_next_font_family` in hourly_run.py, mirroring the existing
@@ -163,18 +160,10 @@ def _hex_to_rgb(hex_color: str) -> tuple:
 # rotation between the two happens across posts, never within one card.
 _FONT_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "fonts_hindi")
 
-# Per-family, per-role font file. Both families cover Devanagari + Latin
+# Per-family, per-role font file. Eczar covers Devanagari + Latin
 # natively, so one file per role is enough — no separate Deva/Latin
 # routing needed the way the old Inknut/League setup required.
 FONT_FAMILIES = {
-    "kalam": {
-        # Light is used for every role - Kalam's Bold cut is intentionally
-        # never referenced anywhere in this file.
-        "headline": _os.path.join(_FONT_DIR, "Kalam-Light.ttf"),
-        "body": _os.path.join(_FONT_DIR, "Kalam-Light.ttf"),
-        "tag": _os.path.join(_FONT_DIR, "Kalam-Light.ttf"),
-        "meta": _os.path.join(_FONT_DIR, "Kalam-Light.ttf"),
-    },
     "eczar": {
         # Eczar has a full weight range and declares both dev2 + legacy
         # deva script tables, so it shapes correctly (verified) unlike
@@ -189,11 +178,12 @@ FONT_FAMILIES = {
     },
 }
 
-# Order used for standalone/random fallback (when no font_family is
-# passed in) — hourly_run.py drives the real strict one-by-one rotation
-# externally and always passes font_family explicitly.
-FONT_FAMILY_CHOICES = ["kalam", "eczar"]
-DEFAULT_FONT_FAMILY = "kalam"
+# Only one choice now that Kalam has been removed. Kept as a list (not a
+# bare constant) so hourly_run.py's _next_font_family rotation helper and
+# any standalone/random fallback here keep working unchanged - rotating
+# over a single-item list just always returns "eczar".
+FONT_FAMILY_CHOICES = ["eczar"]
+DEFAULT_FONT_FAMILY = "eczar"
 
 
 def _font_path(family: str, role: str) -> str:
@@ -234,13 +224,54 @@ def _load_font(path: str, size: int) -> ImageFont.FreeTypeFont:
         return ImageFont.load_default(size=size)
 
 
-def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list:
+def _tokenize_keep_phrase(text: str, keep_phrase: str = None) -> list:
+    """Splits `text` on whitespace like str.split(), except that if
+    `keep_phrase` (case-insensitive, whole-word match) appears in `text`,
+    its words are glued into a single token so the wrapper below can
+    never break a line in the middle of it.
+
+    Without this, `_wrap_by_width`'s greedy word-wrap has no idea a
+    highlight phrase exists and will happily split it across two lines
+    whenever the phrase happens to straddle the wrap point - and
+    `_find_highlight_bounds` requires the whole phrase on one line, so a
+    split silently drops the highlighter-marker box entirely. Keeping
+    the phrase atomic during wrapping is what makes the box reliably
+    show up instead of only appearing when word-wrap happens to cooperate.
+    """
+    words = text.split()
+    if not keep_phrase:
+        return words
+    phrase_words = keep_phrase.split()
+    n = len(phrase_words)
+    if n <= 1:
+        return words
+    tokens = []
+    i = 0
+    while i < len(words):
+        if i + n <= len(words) and all(
+            words[i + k].lower() == phrase_words[k].lower() for k in range(n)
+        ):
+            tokens.append(" ".join(words[i:i + n]))
+            i += n
+        else:
+            tokens.append(words[i])
+            i += 1
+    return tokens
+
+
+def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int,
+                    keep_phrase: str = None) -> list:
     """Greedily wraps text into lines that actually fit max_width in
     pixels for the given font, instead of a fixed character count (which
     under- or over-fills the line depending on font/size). Word-splitting
     on whitespace works the same way for Hindi as for English since
-    Devanagari text is space-separated between words."""
-    words = text.split()
+    Devanagari text is space-separated between words.
+
+    keep_phrase: if given, glues that phrase's words into one unbreakable
+    token first (see _tokenize_keep_phrase) so it's never split across
+    two lines - used to keep a highlight phrase intact for the box drawn
+    behind it."""
+    words = _tokenize_keep_phrase(text, keep_phrase)
     if not words:
         return []
     lines = []
@@ -258,7 +289,7 @@ def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int
 
 def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: int,
                    max_size: int, min_size: int, line_spacing_extra: int, step: int = 2,
-                   side_margin: int = 0):
+                   side_margin: int = 0, keep_phrase: str = None):
     """
     Picks the LARGEST font size (within [min_size, max_size]) whose
     pixel-wrapped text fits inside max_width x max_height. This makes
@@ -282,14 +313,14 @@ def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: i
     wrap_width = max(1, max_width - 2 * side_margin)
     for size in range(max_size, min_size - 1, -step):
         font = _load_font(font_path, size)
-        lines = _wrap_by_width(draw, text, font, wrap_width)
+        lines = _wrap_by_width(draw, text, font, wrap_width, keep_phrase=keep_phrase)
         ascent, descent = font.getmetrics()
         line_h = ascent + descent + line_spacing_extra
         if line_h * len(lines) <= max_height:
             return font, lines, line_h
 
     font = _load_font(font_path, min_size)
-    lines = _wrap_by_width(draw, text, font, wrap_width)
+    lines = _wrap_by_width(draw, text, font, wrap_width, keep_phrase=keep_phrase)
     ascent, descent = font.getmetrics()
     line_h = ascent + descent + line_spacing_extra
     max_lines = max(1, max_height // line_h)
@@ -563,11 +594,10 @@ def build_news_card(
     from HINDI_LOGO_PATH, since `theme` in the real pipeline is actually
     the English module's theme object (see the file docstring).
 
-    font_family: "kalam" or "eczar" - which of the two rotating font
-    families this whole card uses (every text element on the card, not
-    just the headline). If omitted, a random family is picked - callers
-    that want strict one-by-one rotation across posts should always
-    pass this explicitly (see hourly_run.py's _next_font_family)."""
+    font_family: "eczar" (the only remaining family) - every text
+    element on the card uses it (not just the headline). If omitted,
+    it defaults to "eczar" anyway - the param is kept for signature
+    compatibility with hourly_run.py's _next_font_family rotation."""
     theme = theme or random.choice(HEADLINE_THEMES)
     font_family = font_family or random.choice(FONT_FAMILY_CHOICES)
     headline_font_path = _font_path(font_family, "headline")
@@ -683,6 +713,7 @@ def build_news_card(
     headline_font, wrapped, line_height = _autofit_text(
         draw, headline, headline_font_path, max_text_width, available_h,
         max_size=150, min_size=60, line_spacing_extra=16, side_margin=24,
+        keep_phrase=highlight,
     )
     block_h = line_height * len(wrapped)
     text_y = panel_top + max(0, (available_h - block_h) // 2)
@@ -702,6 +733,7 @@ def build_news_card(
                 headline_font, wrapped, line_height = _autofit_text(
                     draw, headline, headline_font_path, max_text_width, available_h,
                     max_size=150, min_size=60, line_spacing_extra=16, side_margin=24,
+                    keep_phrase=highlight,
                 )
                 block_h = line_height * len(wrapped)
                 text_y = panel_top + max(0, (available_h - block_h) // 2)
@@ -779,7 +811,7 @@ def build_info_slide(
     hook slide rather than a repeat - then wrapped Hindi body copy pulled
     from the actual article text, evenly inset on all four sides.
 
-    font_family: "kalam" or "eczar" - same rotation param as
+    font_family: "eczar" (the only remaining family) - same param as
     build_news_card. Pass the SAME value used for this carousel's hook
     slide so all slides in one post share one font family.
 
@@ -914,7 +946,7 @@ def build_carousel(
     tinted variant of the same photo (or a per-slide generated background
     if there's no photo).
 
-    font_family: "kalam" or "eczar" - which rotating font family this
+    font_family: "eczar" (the only remaining family) - which family this
     ENTIRE carousel (hook + all info slides) uses. Resolved once here (if
     not passed) so every slide in the post shares one family, then handed
     down to build_news_card / build_info_slide.

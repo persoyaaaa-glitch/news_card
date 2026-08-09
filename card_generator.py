@@ -125,11 +125,52 @@ def _load_font(path: str, size: int, variation: str = None) -> ImageFont.FreeTyp
     return font
 
 
-def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> list:
+def _tokenize_keep_phrase(text: str, keep_phrase: str = None) -> list:
+    """Splits `text` on whitespace like str.split(), except that if
+    `keep_phrase` (case-insensitive, whole-word match) appears in `text`,
+    its words are glued into a single token so the wrapper below can
+    never break a line in the middle of it.
+
+    Without this, `_wrap_by_width`'s greedy word-wrap has no idea a
+    highlight phrase exists and will happily split it across two lines
+    whenever the phrase happens to straddle the wrap point - and
+    `_find_highlight_bounds` requires the whole phrase on one line, so a
+    split silently drops the highlighter-marker box entirely. Keeping
+    the phrase atomic during wrapping is what makes the box reliably
+    show up instead of only appearing when word-wrap happens to cooperate.
+    """
+    words = text.split()
+    if not keep_phrase:
+        return words
+    phrase_words = keep_phrase.split()
+    n = len(phrase_words)
+    if n <= 1:
+        return words
+    tokens = []
+    i = 0
+    while i < len(words):
+        if i + n <= len(words) and all(
+            words[i + k].lower() == phrase_words[k].lower() for k in range(n)
+        ):
+            tokens.append(" ".join(words[i:i + n]))
+            i += n
+        else:
+            tokens.append(words[i])
+            i += 1
+    return tokens
+
+
+def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int,
+                    keep_phrase: str = None) -> list:
     """Greedily wraps text into lines that actually fit max_width in
     pixels for the given font, instead of textwrap's fixed character
-    count (which under- or over-fills the line depending on font/size)."""
-    words = text.split()
+    count (which under- or over-fills the line depending on font/size).
+
+    keep_phrase: if given, glues that phrase's words into one unbreakable
+    token first (see _tokenize_keep_phrase) so it's never split across
+    two lines - used to keep a highlight phrase intact for the box drawn
+    behind it."""
+    words = _tokenize_keep_phrase(text, keep_phrase)
     if not words:
         return []
     lines = []
@@ -147,7 +188,8 @@ def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int
 
 def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: int,
                    max_size: int, min_size: int = 28, variation: str = None,
-                   line_spacing_extra: int = 18, step: int = 2, side_margin: int = 0):
+                   line_spacing_extra: int = 18, step: int = 2, side_margin: int = 0,
+                   keep_phrase: str = None):
     """
     Picks the LARGEST font size (within [min_size, max_size]) whose
     pixel-wrapped text fits inside max_width x max_height. This makes
@@ -171,14 +213,14 @@ def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: i
     wrap_width = max(1, max_width - 2 * side_margin)
     for size in range(max_size, min_size - 1, -step):
         font = _load_font(font_path, size, variation)
-        lines = _wrap_by_width(draw, text, font, wrap_width)
+        lines = _wrap_by_width(draw, text, font, wrap_width, keep_phrase=keep_phrase)
         ascent, descent = font.getmetrics()
         line_h = ascent + descent + line_spacing_extra
         if line_h * len(lines) <= max_height:
             return font, lines, line_h
 
     font = _load_font(font_path, min_size, variation)
-    lines = _wrap_by_width(draw, text, font, wrap_width)
+    lines = _wrap_by_width(draw, text, font, wrap_width, keep_phrase=keep_phrase)
     ascent, descent = font.getmetrics()
     line_h = ascent + descent + line_spacing_extra
     max_lines = max(1, max_height // line_h)
@@ -571,7 +613,7 @@ def build_news_card(
     headline_font, wrapped, line_height = _autofit_text(
         draw, headline, headline_font_path, max_text_width, available_h,
         max_size=162, min_size=56, variation="Bold", line_spacing_extra=10,
-        side_margin=24,
+        side_margin=24, keep_phrase=highlight,
     )
     block_h = line_height * len(wrapped)
     text_y = panel_top + max(0, (available_h - block_h) // 2)
@@ -591,7 +633,7 @@ def build_news_card(
                 headline_font, wrapped, line_height = _autofit_text(
                     draw, headline, headline_font_path, max_text_width, available_h,
                     max_size=162, min_size=56, variation="Bold", line_spacing_extra=10,
-                    side_margin=24,
+                    side_margin=24, keep_phrase=highlight,
                 )
                 block_h = line_height * len(wrapped)
                 text_y = panel_top + max(0, (available_h - block_h) // 2)
