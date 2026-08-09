@@ -125,12 +125,11 @@ ILLUSTRATIVE_LABEL_HI = "सांकेतिक तस्वीर"
 # docstring above) — and even then, the logo actually drawn on the card
 # ALWAYS comes from HINDI_LOGO_PATH below, never from theme["logo"].
 _ASSETS_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "assets")
+# Golden is now the ONLY headline color - silver/warm_taupe removed
+# (not just deprioritized) so every card, whatever calls this module,
+# renders the same flat gold headline instead of rotating through
+# looks.
 HEADLINE_THEMES = [
-    {
-        "name": "silver",
-        "gradient": ["#858489", "#e7e4ef", "#858489", "#b9b9b9", "#858489"],
-        "logo": _os.path.join(_ASSETS_DIR, "logo_black_white.png"),
-    },
     {
         "name": "bronze_gold",
         # Solid color (not a gradient) - all stops identical so the
@@ -139,11 +138,6 @@ HEADLINE_THEMES = [
         # (via _pill_colors_from_theme) and the highlight-marker box.
         "gradient": ["#fac47f", "#fac47f", "#fac47f", "#fac47f", "#fac47f"],
         "logo": _os.path.join(_ASSETS_DIR, "logo_golden.png"),
-    },
-    {
-        "name": "warm_taupe",
-        "gradient": ["#8b806f", "#e8decc", "#8b806f", "#b3ae9a", "#8d8c88"],
-        "logo": _os.path.join(_ASSETS_DIR, "logo_silver.png"),
     },
 ]
 
@@ -187,9 +181,14 @@ FONT_FAMILIES = {
         # Eczar has a full weight range and declares both dev2 + legacy
         # deva script tables, so it shapes correctly (verified) unlike
         # Tiro Devanagari Hindi, which was dropped for this reason.
+        #
         # Regular (400) is Eczar's lightest cut - its variable-font axis
         # only goes from 400-800, there's no Light/Thin instance below
-        # Regular - so Regular is used for every role here, never Bold+.
+        # Regular - so Regular is used for every role here, including
+        # the headline (the heavier static weights - Eczar-SemiBold.ttf
+        # / Eczar-Bold.ttf / Eczar-ExtraBold.ttf - are bundled in
+        # fonts_hindi/ too, in case a bolder headline look is wanted
+        # later, but Regular is what actually ships).
         "headline": _os.path.join(_FONT_DIR, "Eczar-Regular.ttf"),
         "body": _os.path.join(_FONT_DIR, "Eczar-Regular.ttf"),
         "tag": _os.path.join(_FONT_DIR, "Eczar-Regular.ttf"),
@@ -304,6 +303,51 @@ def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int
             current = word
     lines.append(current)
     return lines
+
+
+def _wrap_tokens_by_width(draw, tokens: list, font: ImageFont.FreeTypeFont, max_width: int) -> list:
+    """Same greedy wrap as _wrap_by_width, but keeps each line as a list
+    of tokens instead of a joined string, so a caller can move whole
+    tokens between lines afterward (e.g. to rebalance a wrap point)
+    without ever splitting a glued keep_phrase token apart."""
+    if not tokens:
+        return []
+    lines = [[tokens[0]]]
+    for token in tokens[1:]:
+        candidate = lines[-1] + [token]
+        if draw.textbbox((0, 0), " ".join(candidate), font=font)[2] <= max_width:
+            lines[-1] = candidate
+        else:
+            lines.append([token])
+    return lines
+
+
+def _rebalance_last_line(draw, lines_tokens: list, font: ImageFont.FreeTypeFont,
+                          wrap_width: int, safe_last_width: int) -> list:
+    """Shifts tokens one at a time from the start of the last line to
+    the end of the second-to-last line - same font size, same total
+    line count - until the last line's rendered width fits within
+    safe_last_width, or until doing so would overflow the previous
+    line past wrap_width (at which point it stops; the caller decides
+    what to fall back to). This only relocates the existing break
+    point by a word or two instead of re-wrapping everything at a
+    smaller size/width, so headlines that already fit comfortably
+    don't need to shrink at all to clear the logo."""
+    lines_tokens = [list(line) for line in lines_tokens]
+    if len(lines_tokens) < 2:
+        return lines_tokens
+    while True:
+        last_line = lines_tokens[-1]
+        last_w = draw.textbbox((0, 0), " ".join(last_line), font=font)[2]
+        if last_w <= safe_last_width or len(last_line) <= 1:
+            break
+        moved = last_line[0]
+        candidate_prev = lines_tokens[-2] + [moved]
+        if draw.textbbox((0, 0), " ".join(candidate_prev), font=font)[2] > wrap_width:
+            break
+        lines_tokens[-2] = candidate_prev
+        lines_tokens[-1] = last_line[1:]
+    return lines_tokens
 
 
 def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: int,
@@ -471,12 +515,6 @@ def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, tex
     visible gap to neighboring words on each side."""
     i = bounds["line_index"]
     line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
-    # The box is sized tight to the highlighted text's own ink bounds
-    # (no horizontal padding added/subtracted) - the natural word-space
-    # already present in the line before/after the highlighted phrase
-    # (exactly one space-character's width, since it's real text layout)
-    # is left untouched outside the box, so that's the visible gap to
-    # the neighboring words on each side.
     h_pad = 0
     v_pad = max(8, round(font_size * 0.10))
     line_top = text_y + i * line_height
@@ -651,12 +689,14 @@ def build_news_card(
     # Bottom gradient fade so the photo darkens progressively behind the
     # headline/source text (which now sits directly over the photo, not
     # over a solid black panel) and blends cleanly into the black footer
-    # strip at the very bottom. Fade starts near where the headline text
-    # block begins (IMAGE_H, the legacy text anchor) and reaches full
-    # black exactly at the top of the black footer strip.
+    # strip at the very bottom. Fade starts a bit ABOVE the headline
+    # panel's top (panel_top is IMAGE_H + a small offset - see below) so
+    # the enlarged headline text always sits on already-darkened photo,
+    # even at its topmost line, and still reaches full black exactly at
+    # the top of the black footer strip.
     fade = Image.new("L", (CANVAS_W, HOOK_PHOTO_H), 0)
     fade_draw = ImageDraw.Draw(fade)
-    fade_start = min(IMAGE_H, HOOK_PHOTO_H)
+    fade_start = min(IMAGE_H - 60, HOOK_PHOTO_H)
     fade_height = HOOK_PHOTO_H - fade_start
     for y in range(fade_height):
         alpha = int(255 * (y / fade_height))
@@ -734,7 +774,12 @@ def build_news_card(
     # rendered box would genuinely overlap the logo's corner, refit
     # against a height that avoids it.
     max_text_width = CANVAS_W - 2 * pad_x
-    panel_top = IMAGE_H + 45
+    # Panel top pulled up close to IMAGE_H (was +45) to hand the headline
+    # a bigger vertical box to autofit into - directly increases the
+    # rendered font size on most headlines. The fade above was moved to
+    # start earlier (IMAGE_H - 60) specifically so this bigger panel's
+    # topmost line still lands on darkened photo, not raw brightness.
+    panel_top = IMAGE_H + 5
     meta_y = CANVAS_H - 70
     logo_reserved_gap = 16
     # Logo now lives vertically centered inside the slim black footer
@@ -749,9 +794,16 @@ def build_news_card(
     # min_size/line_spacing bumped up slightly vs. the English generator:
     # Devanagari matras/conjuncts need a bit more vertical breathing room
     # and stop being legible sooner than Latin does as size shrinks.
+    # Floor is 48, not 60: a longer headline can need one more line to
+    # wrap into than a 60-min search would ever find room for, and a
+    # 60-only search that fails just truncates with an ellipsis instead
+    # of trying a smaller size that actually fits whole. 48 is chosen so
+    # even a worst-case 3-line headline still fits available_h - most
+    # headlines still land at 60+ since _autofit_text always tries the
+    # largest working size first.
     headline_font, wrapped, line_height = _autofit_text(
         draw, headline, headline_font_path, max_text_width, available_h,
-        max_size=150, min_size=60, line_spacing_extra=16, side_margin=24,
+        max_size=190, min_size=48, line_spacing_extra=9, side_margin=16,
         keep_phrase=highlight,
     )
     block_h = line_height * len(wrapped)
@@ -764,18 +816,58 @@ def build_news_card(
             last_line_w = last_line_bbox[2] - last_line_bbox[0]
             last_line_x_start = pad_x + (max_text_width - last_line_w) // 2
             last_line_x_end = last_line_x_start + last_line_w
-            # Only re-fit into the smaller box if the last line would
-            # actually reach into the logo's horizontal corner too -
-            # most centered short lines never get that far right.
+            # Only re-fit if the last line would actually reach into the
+            # logo's horizontal corner too - most centered short lines
+            # never get that far right.
             if last_line_x_end > logo_left - logo_reserved_gap:
-                available_h = (logo_top - logo_reserved_gap) - panel_top
-                headline_font, wrapped, line_height = _autofit_text(
-                    draw, headline, headline_font_path, max_text_width, available_h,
-                    max_size=150, min_size=60, line_spacing_extra=16, side_margin=24,
-                    keep_phrase=highlight,
-                )
-                block_h = line_height * len(wrapped)
-                text_y = panel_top + max(0, (available_h - block_h) // 2)
+                # Don't shrink the vertical box - the space above the
+                # logo (~209px) can only ever hold ONE line at min_size,
+                # so that always collapsed a legitimate 2-line headline
+                # to 1 line + an ellipsis. The block only needs to dodge
+                # the logo horizontally (it's a small bottom-right
+                # corner badge, not a full-width bar).
+                #
+                # First choice: rebalance the existing wrap - move the
+                # last line's leading word(s) back onto the previous
+                # line, same font size, same total line count. This is
+                # the minimal fix for the common case (a 2-line
+                # headline with slack to spare) and doesn't force a 3rd
+                # line the way re-wrapping everything at a narrower
+                # width would (that just relocates the truncation
+                # instead of fixing it, since 3 lines' worth of text at
+                # min_size no longer fits available_h).
+                wrap_width = max_text_width - 2 * 16  # matches the side_margin used above
+                safe_last_line_w = 2 * (logo_left - logo_reserved_gap - pad_x) - max_text_width
+                tokens = _tokenize_keep_phrase(headline, highlight)
+                lines_tokens = _wrap_tokens_by_width(draw, tokens, headline_font, wrap_width)
+                rebalanced_tokens = _rebalance_last_line(draw, lines_tokens, headline_font, wrap_width, safe_last_line_w)
+                rebalanced = [" ".join(line) for line in rebalanced_tokens]
+                rebalanced_last_bbox = draw.textbbox((0, 0), rebalanced[-1], font=headline_font) if rebalanced else None
+
+                if rebalanced_last_bbox and (rebalanced_last_bbox[2] - rebalanced_last_bbox[0]) <= safe_last_line_w:
+                    wrapped = rebalanced
+                    block_h = line_height * len(wrapped)
+                    text_y = panel_top + max(0, (available_h - block_h) // 2)
+                else:
+                    # Rebalancing alone couldn't clear it (previous line
+                    # has no slack left, usually because the headline is
+                    # long enough to need 3 lines to dodge the logo at
+                    # all) - fall back to re-wrapping the whole block at
+                    # a narrower width. _autofit_text tries every size
+                    # from max_size down before ever touching min_size,
+                    # so this still renders at 60 whenever 60 fits; the
+                    # floor matches the first pass (48) as a last resort
+                    # so a genuinely long headline gets a smaller-but-
+                    # whole headline instead of an ellipsis - dropping
+                    # words is worse than a few points of font size.
+                    logo_side_margin = max(16, (max_text_width - safe_last_line_w) // 2 + 1)
+                    headline_font, wrapped, line_height = _autofit_text(
+                        draw, headline, headline_font_path, max_text_width, available_h,
+                        max_size=190, min_size=48, line_spacing_extra=9, side_margin=logo_side_margin,
+                        keep_phrase=highlight,
+                    )
+                    block_h = line_height * len(wrapped)
+                    text_y = panel_top + max(0, (available_h - block_h) // 2)
 
     # _autofit_text steps the font size down in fixed increments, and word
     # wrap can jump from N to N+1 lines right at the step where a bigger
@@ -795,6 +887,19 @@ def build_news_card(
     gradient_stops = ["#ffffff", "#e0e0e0", "#ffffff", "#f2f2f2", "#ffffff"] if grayscale else theme["gradient"]
 
     highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
+    # If the headline wrapped to more than one line AND the highlighted
+    # phrase happens to be the ENTIRE content of its line (nothing before
+    # or after it there), skip the box/ink treatment rather than paint a
+    # bar edge-to-edge across that line - a full-width box on the top
+    # line of a multi-line headline reads as a heavy, ugly slab, not a
+    # highlighter mark, since there's no surrounding un-highlighted text
+    # on that line to show the box "picking out" a phrase from. The
+    # phrase still renders, just in the normal gradient color like the
+    # rest of the headline instead of getting the box+black-ink treatment.
+    if highlight_bounds and len(wrapped) > 1:
+        suffix_w = highlight_bounds["line_w"] - highlight_bounds["prefix_w"] - highlight_bounds["hl_w"]
+        if highlight_bounds["prefix_w"] <= 2 and suffix_w <= 2:
+            highlight_bounds = None
     if highlight_bounds:
         box_color = _hex_to_rgb(theme["gradient"][0])
         _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color, headline_font.size, font=headline_font)
