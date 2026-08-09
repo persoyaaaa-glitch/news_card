@@ -257,7 +257,8 @@ def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int
 
 
 def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: int,
-                   max_size: int, min_size: int, line_spacing_extra: int, step: int = 2):
+                   max_size: int, min_size: int, line_spacing_extra: int, step: int = 2,
+                   side_margin: int = 0):
     """
     Picks the LARGEST font size (within [min_size, max_size]) whose
     pixel-wrapped text fits inside max_width x max_height. This makes
@@ -265,19 +266,30 @@ def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: i
     smaller (fitting the box) instead of one fixed size that leaves
     empty space for short text and gets truncated for long text.
 
+    `side_margin` reserves that many pixels on EACH side of the box that
+    wrapping is not allowed to use - i.e. wrapping targets
+    (max_width - 2*side_margin), while `max_width` itself stays the box
+    width used for centering elsewhere. Without this, `_wrap_by_width`
+    is free to pack a line right up to max_width, so a line can end up
+    glued flush to the box's edges with zero breathing room while other
+    lines in the same block sit comfortably inset - an uneven, "squeezed"
+    look. With a margin reserved, every line - short or long - keeps at
+    least side_margin px of clear space on both sides.
+
     Returns (font, wrapped_lines, line_height). If even min_size doesn't
     fit, the text is truncated with an ellipsis as a last resort.
     """
+    wrap_width = max(1, max_width - 2 * side_margin)
     for size in range(max_size, min_size - 1, -step):
         font = _load_font(font_path, size)
-        lines = _wrap_by_width(draw, text, font, max_width)
+        lines = _wrap_by_width(draw, text, font, wrap_width)
         ascent, descent = font.getmetrics()
         line_h = ascent + descent + line_spacing_extra
         if line_h * len(lines) <= max_height:
             return font, lines, line_h
 
     font = _load_font(font_path, min_size)
-    lines = _wrap_by_width(draw, text, font, max_width)
+    lines = _wrap_by_width(draw, text, font, wrap_width)
     ascent, descent = font.getmetrics()
     line_h = ascent + descent + line_spacing_extra
     max_lines = max(1, max_height // line_h)
@@ -379,29 +391,46 @@ def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
         exact_slice = line[idx: idx + len(highlight_norm)]
         hl_bbox = draw.textbbox((0, 0), exact_slice, font=font)
         hl_w = hl_bbox[2] - hl_bbox[0]
+        # Actual ink extent of just this slice (not the font's full
+        # ascent+descent line-box, which for Devanagari reserves headroom
+        # for tall matras/reph marks well beyond what's in this specific
+        # phrase) - sizing the box off this instead of line_height keeps
+        # it hugging the visible letters instead of towering over them.
+        hl_top, hl_bottom = hl_bbox[1], hl_bbox[3]
 
         return {
             "line_index": i, "line_w": line_w,
             "prefix_w": prefix_w, "hl_w": hl_w, "exact_slice": exact_slice,
+            "hl_top": hl_top, "hl_bottom": hl_bottom,
         }
     return None
 
 
 def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, text_y: int,
-                         pad_x: int, max_text_width: int, box_color: tuple):
-    """Paints the highlighter-marker box, filled with box_color (the
-    headline's own gradient color). Must run BEFORE _draw_gradient_text."""
+                         pad_x: int, max_text_width: int, box_color: tuple, font_size: int):
+    """Paints the sharp-cornered highlighter-marker box, filled with
+    box_color (the headline's own gradient color). Must run BEFORE
+    _draw_gradient_text. Vertically sized off the highlighted slice's own
+    ink bbox (hl_top/hl_bottom), not the line's full font-metric height -
+    see _find_highlight_bounds.
+
+    Padding scales with font size instead of a fixed 6px - at headline
+    sizes a flat 6px reads as the glyphs hugging the box edge with the
+    box itself butted up against the neighboring word. Scaling keeps
+    visible breathing room on both sides at every size."""
     i = bounds["line_index"]
     line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
-    h_pad, v_pad = 10, 6
+    h_pad = max(12, round(font_size * 0.16))
+    v_pad = max(8, round(font_size * 0.10))
+    line_top = text_y + i * line_height
     box = [
         line_x + bounds["prefix_w"] - h_pad,
-        text_y + i * line_height + v_pad,
+        line_top + bounds["hl_top"] - v_pad,
         line_x + bounds["prefix_w"] + bounds["hl_w"] + h_pad,
-        text_y + (i + 1) * line_height - v_pad,
+        line_top + bounds["hl_bottom"] + v_pad,
     ]
     draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle(box, radius=10, fill=box_color)
+    draw.rectangle(box, fill=box_color)
 
 
 def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: int, text_y: int,
@@ -653,7 +682,7 @@ def build_news_card(
     # and stop being legible sooner than Latin does as size shrinks.
     headline_font, wrapped, line_height = _autofit_text(
         draw, headline, headline_font_path, max_text_width, available_h,
-        max_size=150, min_size=60, line_spacing_extra=16,
+        max_size=150, min_size=60, line_spacing_extra=16, side_margin=24,
     )
     block_h = line_height * len(wrapped)
     text_y = panel_top + max(0, (available_h - block_h) // 2)
@@ -672,7 +701,7 @@ def build_news_card(
                 available_h = (logo_top - logo_reserved_gap) - panel_top
                 headline_font, wrapped, line_height = _autofit_text(
                     draw, headline, headline_font_path, max_text_width, available_h,
-                    max_size=150, min_size=60, line_spacing_extra=16,
+                    max_size=150, min_size=60, line_spacing_extra=16, side_margin=24,
                 )
                 block_h = line_height * len(wrapped)
                 text_y = panel_top + max(0, (available_h - block_h) // 2)
@@ -697,7 +726,7 @@ def build_news_card(
     highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
     if highlight_bounds:
         box_color = _hex_to_rgb(theme["gradient"][0])
-        _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color)
+        _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color, headline_font.size)
 
     _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_height, gradient_stops,
                          block_width=max_text_width, center=True)
@@ -843,7 +872,7 @@ def build_info_slide(
     available_h = panel_bottom - panel_top
     body_font, body_wrapped, body_line_h = _autofit_text(
         draw, body_text, _font_path(font_family, "body"), max_text_width, available_h,
-        max_size=58, min_size=34, line_spacing_extra=24,
+        max_size=58, min_size=34, line_spacing_extra=24, side_margin=24,
     )
     body_block_h = body_line_h * len(body_wrapped)
 
