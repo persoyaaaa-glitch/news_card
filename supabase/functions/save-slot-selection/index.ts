@@ -11,13 +11,19 @@
 // app_state, which the anon key can only read (see
 // supabase_app_additions.sql).
 //
-// No AI call happens here on purpose - re-running the Gemini digest
-// call every time someone toggles a checkbox would be slow and easy to
-// rate-limit. The caption below is the same templated numbered-list
-// format hourly_run.build_combined_caption already falls back to when
-// its own AI call fails, so an edited slot still reads cleanly - it
-// just won't have the AI-written "digest" tone the untouched default
-// gets from content_pregen.py.
+// No AI call happens here on purpose - re-running Gemini every time
+// someone toggles a checkbox or drags a reorder handle would be slow
+// and easy to rate-limit. Instead, each candidate already carries its
+// own detailed per-story write-up - caption_paragraph / caption_paragraph_hi
+// (~90-150 words, generated once when the candidate was built - see
+// ai_text.generate_hook_and_detail / translate_story_to_hindi via
+// hourly_run.build_candidates) - and this function just assembles those
+// into one caption, in the EXACT order `selected` is given. Since
+// `selected` is built from the client's selected_story_ids array (see
+// below), whatever order the reviewer dragged the stories into IS the
+// order they appear in the caption - mirrors
+// hourly_run.build_combined_caption/_hindi, which do the identical
+// assembly for the untouched default (see content_pregen.py).
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -27,6 +33,12 @@ const CORS_HEADERS = {
 
 const MAX_IMAGES = 10;   // Instagram's per-carousel cap - see hourly_run.py
 const MAX_STORIES = 5;   // STORIES_PER_POST in daily_scheduler.py
+const IG_CAPTION_CHAR_LIMIT = 2200; // Instagram's hard cap on caption length, hashtags included
+
+const HASHTAGS_EN = "#IndiaNews #TopStories #NewsRoundup #Trending #BreakingNews " +
+  "#DailyNews #WorldNews #NewsUpdate #CurrentAffairs #NewsToday";
+const HASHTAGS_HI = "#IndiaNews #HindiNews #आजकीखबर #Trending #BreakingNews " +
+  "#DailyNews #WorldNews #NewsUpdate #CurrentAffairs #NewsToday";
 
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
@@ -35,20 +47,51 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+// Assembles intro + numbered story blocks + hashtags, trimming from the
+// END (lowest-priority story) if it would exceed IG_CAPTION_CHAR_LIMIT -
+// mirrors hourly_run._fit_caption exactly, so the same slot's caption
+// comes out the same whether it was built by content_pregen.py or
+// re-saved here after a reorder.
+function fitCaption(intro: string, blocks: string[], hashtagLine: string): string {
+  let remaining = blocks.slice();
+  while (remaining.length > 0) {
+    const lines = [intro, ""];
+    remaining.forEach((block, i) => {
+      lines.push(`${i + 1}. ${block}`);
+      lines.push("");
+    });
+    const caption = lines.join("\n").replace(/\n+$/, "") + "\n\n" + hashtagLine;
+    if (caption.length <= IG_CAPTION_CHAR_LIMIT) return caption;
+    if (remaining.length === 1) {
+      const overflow = caption.length - IG_CAPTION_CHAR_LIMIT;
+      const keep = Math.max(0, remaining[0].length - overflow - 1);
+      const trimmed = remaining[0].slice(0, keep).trimEnd() + "…";
+      return [intro, "", `1. ${trimmed}`].join("\n") + "\n\n" + hashtagLine;
+    }
+    remaining = remaining.slice(0, -1); // drop the lowest-priority story and retry
+  }
+  return (intro + "\n\n" + hashtagLine).slice(0, IG_CAPTION_CHAR_LIMIT);
+}
+
 function templatedCaption(selected: any[]): string {
-  const lines = [`Today's top ${selected.length} stories:\n`];
-  selected.forEach((c, i) => lines.push(`${i + 1}. ${c.title} (Source: ${c.source})`));
-  return lines.join("\n") +
-    "\n\n#IndiaNews #TopStories #NewsRoundup #Trending #BreakingNews " +
-    "#DailyNews #WorldNews #NewsUpdate #CurrentAffairs #NewsToday";
+  const intro = `Today's top ${selected.length} stories - here's what's happening:`;
+  const blocks = selected.map((c) => {
+    const body = c.caption_paragraph || c.detail_text || "";
+    const headlinePart = body ? `${c.title} — ${body}` : c.title;
+    return `${headlinePart} (Source: ${c.source})`;
+  });
+  return fitCaption(intro, blocks, HASHTAGS_EN);
 }
 
 function templatedCaptionHindi(selected: any[]): string {
-  const lines = [`आज की ${selected.length} बड़ी खबरें:\n`];
-  selected.forEach((c, i) => lines.push(`${i + 1}. ${c.title} (Source: ${c.source})`));
-  return lines.join("\n") +
-    "\n\n#IndiaNews #HindiNews #आजकीखबर #Trending #BreakingNews " +
-    "#DailyNews #WorldNews #NewsUpdate #CurrentAffairs #NewsToday";
+  const intro = `आज की ${selected.length} बड़ी खबरें:`;
+  const blocks = selected.map((c) => {
+    const headline = c.title_hi || c.title;
+    const body = c.caption_paragraph_hi || "";
+    const headlinePart = body ? `${headline} — ${body}` : headline;
+    return `${headlinePart} (Source: ${c.source})`;
+  });
+  return fitCaption(intro, blocks, HASHTAGS_HI);
 }
 
 Deno.serve(async (req) => {

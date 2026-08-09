@@ -87,11 +87,25 @@ def _slot_from_candidates(candidates: list, selected_ids: list) -> dict:
 
     caption_stories = [
         {"title": c["title"], "source": c["source"], "detail_text": c.get("detail_text"),
-         "is_sensitive": c.get("is_sensitive", False)}
+         "caption_paragraph": c.get("caption_paragraph"), "is_sensitive": c.get("is_sensitive", False)}
         for c in selected
     ]
     caption = hourly_run.build_combined_caption(caption_stories)
-    caption_hi = hourly_run.build_combined_caption_hindi(caption, caption_stories) if image_urls_hi else ""
+
+    caption_hi = ""
+    if image_urls_hi:
+        # Same field names build_combined_caption_hindi expects
+        # (headline_hi/caption_paragraph_hi/detail_hi) - candidates
+        # store the Hindi headline as "title_hi", so map it across.
+        # No AI call here: every story's Hindi text was already
+        # translated once when its candidate was built (see
+        # hourly_run.build_candidates / _build_hindi_slides).
+        caption_stories_hi = [
+            {"title": c["title"], "source": c["source"], "headline_hi": c.get("title_hi"),
+             "caption_paragraph_hi": c.get("caption_paragraph_hi")}
+            for c in selected
+        ]
+        caption_hi = hourly_run.build_combined_caption_hindi(caption_stories_hi)
 
     stories = [
         {"title": c["title"], "source": c["source"], "is_sensitive": c.get("is_sensitive", False),

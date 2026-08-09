@@ -103,7 +103,7 @@ def run():
             continue
         raw_article_text = " ".join(paragraphs)
 
-        ai_hook, ai_detail = generate_hook_and_detail(title, raw_article_text, source)
+        ai_hook, ai_detail, _ai_highlight, _ai_caption_paragraph = generate_hook_and_detail(title, raw_article_text, source)
         display_headline = ai_hook or title
         if ai_detail:
             slide_texts = [ai_detail]

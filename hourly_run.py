@@ -39,6 +39,13 @@ from image_fetch import get_article_image_from_resolved_url, resolve_article_url
 from article_extract import get_carousel_slide_texts, extract_article_paragraphs
 from card_generator import build_carousel, HEADLINE_THEMES
 import card_generator_hindi
+
+# Hindi is golden-only: unlike the English page (which rotates through
+# HEADLINE_THEMES above), every Hindi carousel always uses this single
+# golden theme, regardless of whichever theme _next_theme() rotated in
+# for the English page that run. card_generator_hindi.HEADLINE_THEMES
+# now only contains this one entry, so grab it from there directly.
+HINDI_THEME = card_generator_hindi.HEADLINE_THEMES[0]
 from supabase_client import is_duplicate_story, get_recent_titles, mark_as_posted, upload_carousel_images, get_state, save_state
 from instagram_publish import post_carousel_to_instagram, post_to_instagram, find_recent_matching_post
 from ai_text import (
@@ -232,10 +239,12 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
 
     Returns a dict with the built post plus diagnostic flags so callers
     can audit quality (used_real_image, has_description_slide).
-    Also includes "detail_text" (the short AI-written detail summary,
-    if one was generated) for callers that want a one-line blurb per
-    story without the full formatted caption - e.g. run_combined()'s
-    digest caption prompt.
+    Also includes "detail_text" (the short AI-written detail summary
+    for the card's second slide, if one was generated) and
+    "caption_paragraph" (a longer, 4-7 sentence write-up of the same
+    story meant for the Instagram caption rather than the card image -
+    see ai_text.generate_hook_and_detail) for callers building a
+    combined multi-story caption, e.g. build_combined_caption().
     """
     title, link, source = article["title"], article["link"], article["source"] or "News"
     is_breaking = article.get("is_breaking", False)
@@ -279,11 +288,13 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
     display_headline = title
     detail_text = None
     highlight_text = None
+    caption_paragraph = None
     slide_texts = []
     if len(paragraphs) >= 2:
-        ai_hook, ai_detail, ai_highlight = generate_hook_and_detail(title, raw_article_text, source, sensitive=sensitive)
+        ai_hook, ai_detail, ai_highlight, ai_caption_paragraph = generate_hook_and_detail(title, raw_article_text, source, sensitive=sensitive)
         display_headline = ai_hook or title
         detail_text = ai_detail
+        caption_paragraph = ai_caption_paragraph
         # ai_highlight was already validated (in ai_text.py) as an exact
         # substring of ai_hook - but if ai_hook itself got rejected and we
         # fell back to the raw scraped `title` above, that guarantee no
@@ -332,6 +343,7 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
         "slide_paths": slide_paths,
         "caption": caption,
         "detail_text": detail_text,
+        "caption_paragraph": caption_paragraph,  # longer per-story write-up for the Instagram caption (see ai_text.generate_hook_and_detail)
         "highlight_text": highlight_text,  # exact substring of display_headline to mark, or None
         "slide_texts": slide_texts,  # raw list backing slide_paths[1:] - kept for the Hindi translation pass (_build_hindi_slides)
         # Diagnostics, for QA/trial runs to audit at a glance:
@@ -347,13 +359,20 @@ def _build_hindi_slides(result: dict, theme: dict, out_dir: str = CARD_DIR, tmp_
     Given an already-built English `result` dict (see _build_post),
     translates its headline + body text into Hindi and renders the SAME
     story as a Hindi-language carousel via card_generator_hindi, reusing
-    the same photo, tag, theme, breaking flag, and grayscale/sensitive
-    treatment as the English version - only the text differs.
+    the same photo, tag, breaking flag, and grayscale/sensitive treatment
+    as the English version - only the text differs.
+
+    `theme` (the English page's rotating theme for this run) is accepted
+    for signature/call-site compatibility but deliberately IGNORED here -
+    the Hindi carousel always renders with HINDI_THEME (golden), the
+    Hindi page's one and only look, regardless of what's rotating for
+    English that run.
 
     Returns a dict {"slide_paths": [...], "headline_hi": str,
-    "detail_hi": str or None} or None if translation failed (e.g.
-    Gemini quota exhausted) - callers should just skip the Hindi post
-    for that story in that case, never post an untranslated card.
+    "detail_hi": str or None, "caption_paragraph_hi": str or None} or
+    None if translation failed (e.g. Gemini quota exhausted) - callers
+    should just skip the Hindi post for that story in that case, never
+    post an untranslated card.
     """
     title = result["title"]
     tag = result["tag"]
@@ -375,8 +394,9 @@ def _build_hindi_slides(result: dict, theme: dict, out_dir: str = CARD_DIR, tmp_
     # translate off of (title, first body chunk) as the grounding pair;
     # any extra body chunks beyond the first are translated individually
     # below with the plain single-string translator.
-    headline_hi, detail_hi, highlight_hi = translate_story_to_hindi(
+    headline_hi, detail_hi, highlight_hi, caption_paragraph_hi = translate_story_to_hindi(
         title, first_body_en, sensitive=sensitive, highlight_en=result.get("highlight_text"),
+        caption_paragraph=result.get("caption_paragraph"),
     )
     if not headline_hi:
         print(f"  -> [hi] translation failed for '{title[:50]}...' - skipping Hindi post for this story")
@@ -407,13 +427,14 @@ def _build_hindi_slides(result: dict, theme: dict, out_dir: str = CARD_DIR, tmp_
         out_dir=out_dir,
         base_filename=base_filename_hi,
         breaking=result.get("is_breaking", False),
-        theme=theme,
+        theme=HINDI_THEME,
         grayscale=sensitive,
         font_family=_next_font_family(),
         highlight=highlight_hi,
     )
 
-    return {"slide_paths": slide_paths_hi, "headline_hi": headline_hi, "detail_hi": detail_hi, "highlight_hi": highlight_hi}
+    return {"slide_paths": slide_paths_hi, "headline_hi": headline_hi, "detail_hi": detail_hi,
+            "highlight_hi": highlight_hi, "caption_paragraph_hi": caption_paragraph_hi}
 
 
 def run(max_attempts: int = 30, apply_jitter: bool = True, dry_run: bool = False, include_global: bool = True):
@@ -683,80 +704,93 @@ def run_batch(story_count: int = 10, max_attempts: int = 60, out_dir: str = None
     return results
 
 
+IG_CAPTION_CHAR_LIMIT = 2200  # Instagram's hard cap on caption length, hashtags included
+
+DEFAULT_HASHTAGS_EN = ["#IndiaNews", "#TopStories", "#NewsRoundup", "#Trending", "#BreakingNews",
+                        "#DailyNews", "#WorldNews", "#NewsUpdate", "#CurrentAffairs", "#NewsToday"]
+DEFAULT_HASHTAGS_HI = ["#IndiaNews", "#HindiNews", "#आजकीखबर", "#Trending", "#BreakingNews",
+                        "#DailyNews", "#WorldNews", "#NewsUpdate", "#CurrentAffairs", "#NewsToday"]
+
+
+def _fit_caption(intro: str, story_blocks: list, hashtags: list) -> str:
+    """
+    Assembles intro + numbered story blocks + hashtags into one caption
+    string, in the EXACT order story_blocks is given - never reorders,
+    so whatever order the caller's list is in (priority order, or a
+    reviewer's reordering) is the order that ends up on Instagram.
+
+    If the assembled text would exceed IG_CAPTION_CHAR_LIMIT, drops the
+    LAST (lowest-priority) story block and retries - hashtags and the
+    intro line always survive since they're what makes the post
+    findable/on-brand. If it's still too long with only one story left,
+    trims that story's own text (rather than silently exceeding the
+    limit or dropping the only story).
+    """
+    hashtag_line = " ".join(hashtags)
+    remaining = list(story_blocks)
+    while remaining:
+        lines = [intro, ""]
+        for i, block in enumerate(remaining, start=1):
+            lines.append(f"{i}. {block}")
+            lines.append("")
+        caption = "\n".join(lines).rstrip("\n") + "\n\n" + hashtag_line
+        if len(caption) <= IG_CAPTION_CHAR_LIMIT:
+            return caption
+        if len(remaining) == 1:
+            overflow = len(caption) - IG_CAPTION_CHAR_LIMIT
+            trimmed = remaining[0][: max(0, len(remaining[0]) - overflow - 1)].rstrip() + "…"
+            return "\n".join([intro, "", f"1. {trimmed}"]) + "\n\n" + hashtag_line
+        remaining = remaining[:-1]  # drop the lowest-priority story and retry
+    return (intro + "\n\n" + hashtag_line)[:IG_CAPTION_CHAR_LIMIT]
+
+
 def build_combined_caption(results: list) -> str:
     """
     ONE caption for a combined multi-story carousel (see run_combined):
-    an AI-written "top N stories" round-up naming every story in
-    priority-rank order, plus a merged/deduped hashtag set (at least
-    10 hashtags, guaranteed - see the top-up below). Falls back to a
-    simple templated numbered list if Gemini generation fails.
+    each story gets its own numbered block - its headline plus the
+    longer per-story write-up (see ai_text.generate_hook_and_detail's
+    "caption_paragraph") explaining what actually happened - assembled
+    in the EXACT order `results` is given. That means reordering a
+    slot's stories (the PWA's review screen, or content_pregen's
+    default priority order before review) reorders the caption too.
+
+    No AI call happens here - every story's paragraph was already
+    generated once when its candidate was built (_build_post /
+    build_candidates), so this is just formatting + fitting Instagram's
+    caption length cap (see _fit_caption). Falls back to detail_text,
+    then just the bare headline, for any one story that's missing a
+    caption_paragraph (e.g. AI generation failed for that story only).
     """
-    stories = [
-        {"headline": r["title"], "source": r["source"], "detail": r.get("detail_text"), "sensitive": r.get("is_sensitive", False)}
-        for r in results
-    ]
-    digest = generate_digest_caption_and_hashtags(stories)
-
-    if digest:
-        hashtags = digest["hashtags"]
-        if len(hashtags) < 10:
-            fallback_tags = ["#IndiaNews", "#TopStories", "#NewsRoundup", "#Trending",
-                              "#BreakingNews", "#DailyNews", "#WorldNews", "#NewsUpdate",
-                              "#CurrentAffairs", "#NewsToday"]
-            for tag in fallback_tags:
-                if len(hashtags) >= 10:
-                    break
-                if tag not in hashtags:
-                    hashtags.append(tag)
-        parts = [digest["caption"], " ".join(hashtags)]
-        return "\n\n".join(parts)
-
-    # Templated fallback: simple numbered list, no AI needed.
-    print("  -> digest caption generation failed, falling back to templated digest caption")
-    lines = [f"Today's top {len(results)} stories:\n"]
-    for i, r in enumerate(results, start=1):
-        lines.append(f"{i}. {r['title']} (Source: {r['source']})")
-    caption = "\n".join(lines)
-    caption += (
-        "\n\n#IndiaNews #TopStories #NewsRoundup #Trending #BreakingNews "
-        "#DailyNews #WorldNews #NewsUpdate #CurrentAffairs #NewsToday"
-    )
-    return caption
+    intro = f"Today's top {len(results)} stories - here's what's happening:"
+    blocks = []
+    for r in results:
+        body = r.get("caption_paragraph") or r.get("detail_text") or ""
+        block = f"{r['title']} — {body}" if body else r["title"]
+        block += f" (Source: {r['source']})"
+        blocks.append(block)
+    return _fit_caption(intro, blocks, DEFAULT_HASHTAGS_EN)
 
 
-def build_combined_caption_hindi(caption_en: str, results: list) -> str:
+def build_combined_caption_hindi(results: list) -> str:
     """
-    Hindi counterpart to build_combined_caption: translates the already-
-    written English digest caption (same story order, same facts) into
-    Hindi, with a fresh Hindi-relevant hashtag set. Falls back to a
-    simple templated Hindi numbered list if translation fails, mirroring
-    build_combined_caption's own English fallback.
-    """
-    translated = translate_caption_to_hindi(caption_en)
-    if translated:
-        hashtags = translated["hashtags"]
-        if len(hashtags) < 10:
-            fallback_tags = ["#IndiaNews", "#HindiNews", "#आजकीखबर", "#Trending",
-                              "#BreakingNews", "#DailyNews", "#WorldNews", "#NewsUpdate",
-                              "#CurrentAffairs", "#NewsToday"]
-            for tag in fallback_tags:
-                if len(hashtags) >= 10:
-                    break
-                if tag not in hashtags:
-                    hashtags.append(tag)
-        parts = [translated["caption"], " ".join(hashtags)]
-        return "\n\n".join(parts)
+    Hindi counterpart to build_combined_caption: same per-story
+    assembly, using each story's ALREADY-TRANSLATED Hindi headline and
+    paragraph (headline_hi / caption_paragraph_hi / detail_hi - see
+    hourly_run._build_hindi_slides), in the same order as `results`.
 
-    print("  -> [hi] digest caption translation failed, falling back to templated Hindi digest caption")
-    lines = [f"आज की {len(results)} बड़ी खबरें:\n"]
-    for i, r in enumerate(results, start=1):
-        lines.append(f"{i}. {r['title']} (Source: {r['source']})")
-    caption = "\n".join(lines)
-    caption += (
-        "\n\n#IndiaNews #HindiNews #आजकीखबर #Trending #BreakingNews "
-        "#DailyNews #WorldNews #NewsUpdate #CurrentAffairs #NewsToday"
-    )
-    return caption
+    No extra translation call happens here either - translation to
+    Hindi already happened once per story at build time, same as the
+    English side above.
+    """
+    intro = f"आज की {len(results)} बड़ी खबरें:"
+    blocks = []
+    for r in results:
+        headline = r.get("headline_hi") or r["title"]
+        body = r.get("caption_paragraph_hi") or r.get("detail_hi") or ""
+        block = f"{headline} — {body}" if body else headline
+        block += f" (Source: {r['source']})"
+        blocks.append(block)
+    return _fit_caption(intro, blocks, DEFAULT_HASHTAGS_HI)
 
 
 def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: int = 80,
@@ -896,12 +930,13 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
             r["slide_paths_hi"] = hi["slide_paths"][:images_per_story]
             r["detail_hi"] = hi["detail_hi"]
             r["headline_hi"] = hi["headline_hi"]
+            r["caption_paragraph_hi"] = hi.get("caption_paragraph_hi") or ""
             hi_results.append(r)
         all_slide_paths_hi = [p for r in hi_results for p in r["slide_paths_hi"]]
         if len(all_slide_paths_hi) > 10:
             all_slide_paths_hi = all_slide_paths_hi[:10]
         if all_slide_paths_hi:
-            caption_hi = build_combined_caption_hindi(caption, results)
+            caption_hi = build_combined_caption_hindi(hi_results)
         else:
             print("  -> [hi] no stories translated successfully - skipping the Hindi post entirely this run")
 
@@ -1003,7 +1038,14 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
 
     Returns {"candidates": [...]} where each candidate is:
         {id, title, source, link, priority_rank, is_sensitive,
-         detail_text, title_hi, image_urls, image_urls_hi}
+         detail_text, caption_paragraph, title_hi, caption_paragraph_hi,
+         image_urls, image_urls_hi}
+    caption_paragraph/caption_paragraph_hi are the longer per-story
+    write-ups (see ai_text.generate_hook_and_detail /
+    translate_story_to_hindi) that build_combined_caption and the
+    save-slot-selection Edge Function assemble the final Instagram
+    caption from, in whatever order the candidates end up selected/
+    reordered in - see build_combined_caption below.
     Sorted the same way run_combined orders a post: sensitive stories
     first, priority order within each group - so candidates[:N] is
     exactly what run_combined(story_count=N) would have picked.
@@ -1055,9 +1097,11 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
             if hi is None:
                 r["slide_paths_hi"] = []
                 r["headline_hi"] = ""
+                r["caption_paragraph_hi"] = ""
                 continue
             r["slide_paths_hi"] = hi["slide_paths"][:images_per_story]
             r["headline_hi"] = hi["headline_hi"]
+            r["caption_paragraph_hi"] = hi.get("caption_paragraph_hi") or ""
 
     candidates = []
     for i, r in enumerate(results):
@@ -1073,7 +1117,9 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
             "priority_rank": r["priority_rank"],
             "is_sensitive": r.get("is_sensitive", False),
             "detail_text": r.get("detail_text"),
+            "caption_paragraph": r.get("caption_paragraph") or "",
             "title_hi": r.get("headline_hi", ""),
+            "caption_paragraph_hi": r.get("caption_paragraph_hi") or "",
             "image_urls": image_urls,
             "image_urls_hi": image_urls_hi,
         })

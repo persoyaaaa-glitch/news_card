@@ -73,9 +73,11 @@ Write two pieces of copy, grounded ONLY in the article text above - do not add f
 2. "detail": A crisp, informative summary of the story for the second slide, 2-3 sentences, roughly 40-60 words. This is the "here's what's actually going on" explainer - factual, clear, no fluff, no clickbait, written like a good news brief.
 
 3. "highlight": The single most scroll-stopping word or short phrase (1-3 words) taken VERBATIM from the "hook" text you just wrote - it must be an exact substring of "hook", same spelling and capitalization. Pick whatever carries the most punch: a number, a proper noun, a dramatic verb, or the sharpest phrase. This word/phrase will get a highlighter-marker box behind it on the card, so it should be the thing a reader's eye should land on first, not a filler word like "the" or "a".
+
+4. "caption_paragraph": A detailed, well-written paragraph for this story's Instagram CAPTION (not the card image) - 4-7 sentences, roughly 90-150 words. Explain what actually happened: the key facts, numbers, names, and any important context or background from the article. Written like a real news outlet's Instagram caption - informative and thorough, no fluff, no clickbait, no invented facts. This is separate from "detail" above (which must stay short for the card image) - this one is longer and more explanatory since it's meant to fully inform someone who only reads the caption.
 {sensitive_instruction}
 Respond with ONLY a JSON object, no markdown fences, no preamble, in exactly this shape:
-{{"hook": "...", "detail": "...", "highlight": "..."}}
+{{"hook": "...", "detail": "...", "highlight": "...", "caption_paragraph": "..."}}
 """
 
 # Extra instruction spliced into the prompt above ONLY for stories flagged
@@ -234,11 +236,16 @@ def _validate_highlight(highlight: str | None, hook: str | None) -> str | None:
 def generate_hook_and_detail(headline: str, article_text: str, source: str, timeout: int = 30, sensitive: bool = False) -> tuple:
     """
     Calls Gemini with the real article text and asks for a hook line,
-    detail summary, and highlight phrase. Returns (hook_text,
-    detail_text, highlight_text) - any element may be None if
-    generation failed or (for highlight) didn't validate, so callers
-    should fall back to the raw scraped headline/paragraph text and/or
-    skip the highlight box in that case.
+    detail summary, highlight phrase, and a longer caption paragraph.
+    Returns (hook_text, detail_text, highlight_text, caption_paragraph)
+    - any element may be None if generation failed or (for highlight)
+    didn't validate, so callers should fall back to the raw scraped
+    headline/paragraph text and/or skip the highlight box in that case.
+
+    caption_paragraph is a separate, longer (4-7 sentence) write-up
+    meant for the Instagram CAPTION rather than the card image - see
+    PROMPT_TEMPLATE. Kept distinct from detail_text (which stays short
+    so it still fits the card's second slide).
 
     sensitive: pass True for stories involving death, sexual assault,
     murder, or similarly serious/tragic subjects (see hourly_run.
@@ -246,7 +253,7 @@ def generate_hook_and_detail(headline: str, article_text: str, source: str, time
     instruction for a plain, factual tone instead.
     """
     if not article_text:
-        return None, None, None
+        return None, None, None, None
 
     prompt = PROMPT_TEMPLATE.format(
         headline=headline,
@@ -257,17 +264,18 @@ def generate_hook_and_detail(headline: str, article_text: str, source: str, time
 
     raw_text = _call_gemini(prompt, timeout=timeout)
     if not raw_text:
-        return None, None, None
+        return None, None, None, None
 
     parsed = _extract_json(raw_text)
     if not parsed:
         print(f"[ai_text] could not parse Gemini response as JSON: {raw_text[:200]!r}")
-        return None, None, None
+        return None, None, None, None
 
     hook = parsed.get("hook", "").strip() or None
     detail = parsed.get("detail", "").strip() or None
     highlight = _validate_highlight(parsed.get("highlight", "").strip() or None, hook)
-    return hook, detail, highlight
+    caption_paragraph = parsed.get("caption_paragraph", "").strip() or None
+    return hook, detail, highlight, caption_paragraph
 
 
 CAPTION_PROMPT_TEMPLATE = """You are writing the Instagram caption for a real news carousel post on a news account.
@@ -466,9 +474,10 @@ Keep all numbers, dates, and facts exactly as given. Transliterate proper nouns 
 {sensitive_instruction}
 HEADLINE (English, max ~12 words): {headline}
 DETAIL (English, 2-3 sentences): {detail}
+CAPTION PARAGRAPH (English, 4-7 sentences - this is the longer Instagram caption write-up, translate it in full, keeping every fact/number/name): {caption_paragraph}
 {highlight_instruction}
 Respond with ONLY a JSON object, no markdown fences, no preamble, in exactly this shape:
-{{"headline": "...", "detail": "..."{highlight_json_field}}}
+{{"headline": "...", "detail": "...", "caption_paragraph": "..."{highlight_json_field}}}
 """
 
 # Spliced in only when the English hook had a validated highlight phrase,
@@ -482,10 +491,12 @@ The English version highlights this phrase for emphasis: "{highlight_en}". In yo
 """
 
 
-def translate_story_to_hindi(headline: str, detail_text: str, timeout: int = 30, sensitive: bool = False, highlight_en: str | None = None) -> tuple:
+def translate_story_to_hindi(headline: str, detail_text: str, timeout: int = 30, sensitive: bool = False,
+                              highlight_en: str | None = None, caption_paragraph: str | None = None) -> tuple:
     """
     Translates an already-generated English hook headline + detail
-    summary into natural Hindi news phrasing, for feeding straight into
+    summary (+ optionally the longer caption paragraph) into natural
+    Hindi news phrasing, for feeding straight into
     card_generator_hindi.build_carousel as the `headline` / a slide_texts
     entry for the Hindi-language carousel of the SAME story (same facts,
     same photo, same theme - just the text is localized).
@@ -501,36 +512,46 @@ def translate_story_to_hindi(headline: str, detail_text: str, timeout: int = 30,
     the English substring itself won't match post-translation, so this
     is a fresh pick grounded in the Hindi text actually written.
 
-    Returns (headline_hi, detail_hi, highlight_hi) - headline_hi/
-    detail_hi may be None if translation/parsing failed, so callers
-    should skip building the Hindi post for that story rather than
-    posting an untranslated or partially-translated card. highlight_hi
-    is None whenever highlight_en wasn't given, or if the returned
-    phrase didn't validate as an exact substring of headline_hi.
+    caption_paragraph: the English caption_paragraph (from
+    generate_hook_and_detail), if any - translated in full so the Hindi
+    combined caption can carry the same amount of per-story detail as
+    the English one. Pass None to skip (older callers / no paragraph
+    generated for this story).
+
+    Returns (headline_hi, detail_hi, highlight_hi, caption_paragraph_hi)
+    - headline_hi/detail_hi may be None if translation/parsing failed,
+    so callers should skip building the Hindi post for that story
+    rather than posting an untranslated or partially-translated card.
+    highlight_hi is None whenever highlight_en wasn't given, or if the
+    returned phrase didn't validate as an exact substring of
+    headline_hi. caption_paragraph_hi is None whenever caption_paragraph
+    wasn't given, or translation/parsing failed.
     """
     if not headline:
-        return None, None, None
+        return None, None, None, None
 
     prompt = HINDI_STORY_TRANSLATE_PROMPT_TEMPLATE.format(
         headline=headline,
         detail=detail_text or "",
+        caption_paragraph=caption_paragraph or "",
         sensitive_instruction=SENSITIVE_INSTRUCTION if sensitive else "",
         highlight_instruction=HINDI_HIGHLIGHT_INSTRUCTION_TEMPLATE.format(highlight_en=highlight_en) if highlight_en else "",
         highlight_json_field=', "highlight": "..."' if highlight_en else "",
     )
     raw_text = _call_gemini(prompt, timeout=timeout)
     if not raw_text:
-        return None, None, None
+        return None, None, None, None
 
     parsed = _extract_json(raw_text)
     if not parsed:
         print(f"[ai_text] could not parse Hindi story translation as JSON: {raw_text[:200]!r}")
-        return None, None, None
+        return None, None, None, None
 
     headline_hi = (parsed.get("headline") or "").strip() or None
     detail_hi = (parsed.get("detail") or "").strip() or None
     highlight_hi = _validate_highlight((parsed.get("highlight") or "").strip() or None, headline_hi) if highlight_en else None
-    return headline_hi, detail_hi, highlight_hi
+    caption_paragraph_hi = (parsed.get("caption_paragraph") or "").strip() or None
+    return headline_hi, detail_hi, highlight_hi, caption_paragraph_hi
 
 
 SIMPLE_HINDI_TRANSLATE_PROMPT_TEMPLATE = """Translate the following English news text into natural, everyday Hindi (Devanagari script), the way an Indian Hindi news outlet would phrase it - not a stiff literal translation. Keep numbers, dates, and proper nouns accurate (transliterate people/places/organizations into Devanagari per common Hindi-news convention; keep widely-used acronyms like IPL/ISRO/GDP/AI in Roman script).
@@ -580,8 +601,11 @@ def translate_caption_to_hindi(caption_en: str, timeout: int = 30) -> dict | Non
     Translates a finished English Instagram caption into a Hindi caption
     + a fresh Hindi-relevant hashtag set. Returns {"caption": str,
     "hashtags": list[str]} or None on failure - callers should fall back
-    to a simple templated Hindi caption in that case (see
-    hourly_run.build_combined_caption_hindi).
+    to a simple templated Hindi caption in that case. Note:
+    hourly_run.build_combined_caption_hindi no longer uses this
+    function (it assembles Hindi captions from already-translated
+    per-story text instead) - this is kept for build_single_caption_hindi
+    (single-story posts) and any other single-caption callers.
     """
     if not caption_en:
         return None
