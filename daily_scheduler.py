@@ -673,13 +673,25 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
     persist state). en and hi are fired independently within the same
     check_once() call - at most one post per language per invocation,
     same as the original single-language behavior, just doubled.
+
+    Tries EVERY overdue, non-manual, not-yet-posted slot in order (not
+    just the earliest) until one actually publishes successfully, then
+    stops. Previously this only ever attempted the single earliest
+    overdue slot and gave up for the whole run if that one publish
+    failed - which meant one stuck slot (bad content, a transient IG
+    error, content_pregen.py not having built it yet) permanently
+    head-of-line-blocked every slot after it, since the next check would
+    just find that same earliest slot again and never reach the rest of
+    the day's queue. Falling through to the next candidate on failure
+    fixes that: a stuck slot still gets retried every run (unchanged),
+    but it no longer prevents later, healthy slots from firing on time.
     """
     times_key = "planned_times" if lang == "en" else "planned_times_hi"
     posted_key = "posted" if lang == "en" else "posted_hi"
     last_post_key = "last_post_time" if lang == "en" else "last_post_time_hi"
 
     now = now_ist()
-    due_index = None
+    due_indices = []
     for i, iso_time in enumerate(state[times_key]):
         if state[posted_key][i]:
             continue
@@ -692,20 +704,39 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
                 print(f"[{now.isoformat()}] Failed checking manual slot #{i + 1} ({lang}) "
                       f"against the live feed, will retry next check: {e}")
             continue  # never auto-post a manual slot - just check if you posted it yourself
-        due_index = i
-        break
+        due_indices.append(i)
 
-    if due_index is None:
+    if not due_indices:
         return False
 
     last_post_iso = state.get(last_post_key)
     last_post_dt = datetime.fromisoformat(last_post_iso) if last_post_iso else None
     gap_ok = last_post_dt is None or (now - last_post_dt).total_seconds() >= MIN_GAP_MINUTES * 60
     if not gap_ok:
-        print(f"[{now.isoformat()}] Slot #{due_index + 1} ({lang}) is overdue but the "
+        print(f"[{now.isoformat()}] {len(due_indices)} slot(s) overdue for {lang} but the "
               f"minimum gap since the last {lang} post hasn't elapsed yet - waiting for a later run.")
         return False
 
+    for due_index in due_indices:
+        if _attempt_fire_slot(state, lang, due_index, times_key, posted_key, last_post_key, now):
+            return True
+        print(f"  -> slot #{due_index + 1} ({lang}) didn't publish - trying the next overdue "
+              f"slot instead of blocking on it.")
+
+    return False
+
+
+def _attempt_fire_slot(state: dict, lang: str, due_index: int, times_key: str,
+                        posted_key: str, last_post_key: str, now: datetime) -> bool:
+    """Publishes ONE specific slot for ONE language. Returns True and
+    mutates `state` (marks it posted, bumps last_post_time) only if the
+    post is confirmed to have actually gone out. Split out of
+    _fire_due_slot_for_lang so that function can try multiple candidate
+    slots in one run without duplicating this logic. The per-account gap
+    is already checked once by the caller before this is invoked at all
+    (same gap applies no matter which candidate slot ends up firing), so
+    it isn't re-checked here.
+    """
     planned_dt = datetime.fromisoformat(state[times_key][due_index])
     print(f"[{now.isoformat()}] Firing scheduled {lang} post "
           f"#{due_index + 1}/{len(state[times_key])} "
