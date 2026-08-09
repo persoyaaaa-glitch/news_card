@@ -143,6 +143,7 @@ body{
 .download-all-btn:disabled{opacity:.6;}
 .download-status{text-align:center;font-size:12px;color:var(--text-dim);margin-top:8px;min-height:16px;}
 
+
 .manual-btn{
   width:100%;margin-top:10px;padding:13px;border-radius:10px;
   background:transparent;border:1px solid var(--line);color:var(--text);
@@ -274,6 +275,12 @@ body{
   padding:14px;cursor:pointer;transition:border-color .15s ease, background .15s ease;
 }
 .account-row:active{background:var(--panel-2);}
+.account-row-next{border-color:var(--amber);}
+.account-next-badge{
+  display:inline-block;font-family:'JetBrains Mono',monospace;font-size:10px;
+  letter-spacing:.05em;color:var(--amber);border:1px solid var(--amber);
+  border-radius:5px;padding:1px 5px;margin-top:4px;
+}
 .account-dot{width:8px;height:8px;border-radius:50%;background:var(--green);flex-shrink:0;}
 .account-main{flex:1;min-width:0;}
 .account-handle{font-size:15px;font-weight:700;color:var(--text);}

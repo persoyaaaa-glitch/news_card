@@ -167,12 +167,18 @@ async function saveSubscription(sub) {
 let currentAccountLang = null; // null = on the home screen
 let lastBackPressAt = 0;
 
+// Remembers which screen (home, or a specific account's schedule) was
+// showing so a page refresh/reopen lands back there instead of always
+// resetting to the account picker.
+const ACTIVE_ACCOUNT_KEY = "infact_active_account";
+
 function renderAccountList() {
   const list = document.getElementById("accountList");
   list.innerHTML = "";
   ACCOUNTS.forEach((acc) => {
     const row = document.createElement("div");
     row.className = "account-row";
+    row.dataset.lang = acc.lang;
     row.innerHTML = `
       <img class="account-logo" src="${acc.logo}" alt="">
       <div class="account-main">
@@ -201,6 +207,7 @@ function selectAccount(lang) {
   document.getElementById("app").hidden = false;
   updateAccountHeader(lang);
   history.pushState({ screen: "schedule", lang }, "");
+  localStorage.setItem(ACTIVE_ACCOUNT_KEY, lang);
   refresh();
 }
 
@@ -208,6 +215,54 @@ function showHomeScreen() {
   currentAccountLang = null;
   document.getElementById("app").hidden = true;
   document.getElementById("homeScreen").hidden = false;
+  localStorage.removeItem(ACTIVE_ACCOUNT_KEY);
+  refreshHomeScreenBadge();
+}
+
+// Figures out, across both accounts, which one's next NOT-YET-POSTED
+// slot is soonest, and drops a "NEXT UP" badge on that account's row -
+// so from the picker alone you can see which account needs attention
+// first without opening it.
+function nextUpcomingTime(data, lang) {
+  const now = nowIST();
+  let soonest = null;
+  (data.slots || []).forEach((s) => {
+    const posted = lang === "hi" ? s.posted_hi : s.posted;
+    if (posted) return;
+    const t = plannedTimeOf(s, lang);
+    if (t > now && (!soonest || t < soonest)) soonest = t;
+  });
+  return soonest;
+}
+
+function markNextUpAccount(data) {
+  const withTimes = ACCOUNTS
+    .map((acc) => ({ lang: acc.lang, time: nextUpcomingTime(data, acc.lang) }))
+    .filter((t) => t.time);
+  withTimes.sort((a, b) => a.time - b.time);
+  const nextLang = withTimes.length ? withTimes[0].lang : null;
+
+  document.querySelectorAll(".account-row").forEach((row) => {
+    const isNext = row.dataset.lang === nextLang;
+    row.classList.toggle("account-row-next", isNext);
+    const existingBadge = row.querySelector(".account-next-badge");
+    if (existingBadge) existingBadge.remove();
+    if (isNext) {
+      const badge = document.createElement("span");
+      badge.className = "account-next-badge";
+      badge.textContent = "NEXT UP";
+      row.querySelector(".account-main").appendChild(badge);
+    }
+  });
+}
+
+async function refreshHomeScreenBadge() {
+  try {
+    const data = await fetchDailySlots();
+    markNextUpAccount(data);
+  } catch (e) {
+    console.error(e);
+  }
 }
 
 function showExitToast() {
@@ -405,12 +460,13 @@ function openModal(slot) {
   modal.hidden = false;
 }
 
-// Fills the slides scroller, caption, and download button for whichever
-// language tab is active (slot's English fields have no suffix; Hindi
-// fields are the same shape with an "_hi" suffix - see content_pregen.py /
-// hourly_run.run_combined). Falls back to "no Hindi content" copy if a
-// slot with the tab visible somehow has no Hindi images (e.g. every
-// story in that slot failed translation - see hourly_run._build_hindi_slides).
+// Fills the slides scroller, caption, and share/download button for
+// whichever language tab is active (slot's English fields have no
+// suffix; Hindi fields are the same shape with an "_hi" suffix - see
+// content_pregen.py / hourly_run.run_combined). Falls back to "no
+// Hindi content" copy if a slot with the tab visible somehow has no
+// Hindi images (e.g. every story in that slot failed translation -
+// see hourly_run._build_hindi_slides).
 function renderModalLang(lang) {
   currentModalLang = lang;
   const slot = currentModalSlot;
@@ -424,11 +480,14 @@ function renderModalLang(lang) {
 
   const scroller = document.getElementById("slidesScroller");
   scroller.innerHTML = "";
+  const shareBtn = document.getElementById("downloadAllBtn");
+
   if (!imageUrls.length && lang === "hi") {
     const p = document.createElement("p");
     p.className = "field-hint";
-    p.textContent = "This one's English-only for now - the Hindi version may still catch up on a later run.";
+    p.textContent = "Hindi translation didn't come through for this slot's stories - only the English post will go out.";
     scroller.appendChild(p);
+    shareBtn.hidden = true;
   } else {
     imageUrls.forEach((url) => {
       const img = document.createElement("img");
@@ -436,12 +495,15 @@ function renderModalLang(lang) {
       img.loading = "lazy";
       scroller.appendChild(img);
     });
+    shareBtn.hidden = false;
+    shareBtn.disabled = false;
+    shareBtn.textContent = shareSupportsFiles() ? "Share all slides" : "Download all slides";
   }
 
   document.getElementById("captionText").textContent = caption;
 
   document.getElementById("downloadStatus").textContent = "";
-  document.getElementById("downloadAllBtn").onclick = () => downloadAllSlides(imageUrls, lang);
+  shareBtn.onclick = () => shareOrDownloadSlides(imageUrls, lang, caption);
   document.getElementById("copyBtn").onclick = () => copyCaption(caption);
   document.getElementById("copyBtn").classList.remove("copied");
   document.getElementById("copyBtn").textContent = "Copy";
@@ -877,6 +939,85 @@ async function saveScheduleChanges() {
   }
 }
 
+// Feature-checks Web Share API Level 2 (file sharing) support. Only
+// checked with a dummy JPEG File, since navigator.share exists on more
+// browsers than actually accept `files` (e.g. some desktop browsers
+// have share() for text/url only) - canShare({files}) is the real test.
+function shareSupportsFiles() {
+  if (!navigator.canShare) return false;
+  const probe = new File([""], "probe.jpg", { type: "image/jpeg" });
+  return navigator.canShare({ files: [probe] });
+}
+
+// Primary path: hand every slide straight to the OS share sheet in one
+// go, so the user taps Instagram (or whatever) and posts - no copy
+// ever touches their Gallery, so there's nothing to clean up
+// afterward. Falls back to the old save-each-file-to-Downloads flow on
+// browsers without file-sharing support (desktop, some older mobile
+// browsers) or if the user cancels/it fails for another reason.
+async function shareOrDownloadSlides(imageUrls, lang, caption) {
+  const urls = imageUrls || [];
+  if (!urls.length) {
+    document.getElementById("downloadStatus").textContent = "Nothing to share.";
+    return;
+  }
+  if (shareSupportsFiles()) {
+    const ok = await shareAllSlides(urls, lang, caption);
+    if (ok) return;
+    // shareAllSlides already reported cancellation/failure in the
+    // status line; only fall through to downloading if it was an
+    // actual failure, not a deliberate user cancel.
+    if (lastShareWasUserCancel) return;
+  }
+  await downloadAllSlides(urls, lang);
+}
+
+let lastShareWasUserCancel = false;
+
+async function shareAllSlides(urls, lang, caption) {
+  const btn = document.getElementById("downloadAllBtn");
+  const status = document.getElementById("downloadStatus");
+  lastShareWasUserCancel = false;
+  btn.disabled = true;
+  status.textContent = `Preparing ${urls.length} slide(s) to share...`;
+
+  try {
+    const prefix = lang === "hi" ? "slide-hi" : "slide";
+    const files = await Promise.all(
+      urls.map(async (url, i) => {
+        const resp = await fetch(url);
+        const blob = await resp.blob();
+        return new File([blob], `${prefix}-${String(i + 1).padStart(2, "0")}.jpg`, { type: blob.type || "image/jpeg" });
+      })
+    );
+
+    if (!navigator.canShare({ files })) {
+      // Individual images were shareable in the probe check, but this
+      // exact set (count/total size) isn't - e.g. some browsers cap
+      // how many files can go in one share. Let the caller fall back.
+      status.textContent = "Can't share this many slides at once - falling back to download.";
+      btn.disabled = false;
+      return false;
+    }
+
+    await navigator.share({ files, text: caption || "" });
+    status.textContent = `Sent ${urls.length} slide(s) to share.`;
+    btn.disabled = false;
+    return true;
+  } catch (e) {
+    btn.disabled = false;
+    if (e && e.name === "AbortError") {
+      // User backed out of the share sheet - not an error, just don't
+      // fall back to auto-downloading behind their back.
+      lastShareWasUserCancel = true;
+      status.textContent = "Share cancelled.";
+      return true;
+    }
+    status.textContent = "Sharing failed - falling back to download.";
+    return false;
+  }
+}
+
 async function downloadAllSlides(imageUrls, lang) {
   const btn = document.getElementById("downloadAllBtn");
   const status = document.getElementById("downloadStatus");
@@ -1051,12 +1192,35 @@ document.getElementById("postsCountPlus").addEventListener("click", () => {
   input.value = Math.min(25, (parseInt(input.value, 10) || 1) + 1);
 });
 document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible") refresh();
+  if (document.visibilityState !== "visible") return;
+  if (currentAccountLang) {
+    refresh();
+  } else {
+    refreshHomeScreenBadge();
+  }
 });
 
 history.replaceState({ screen: "home" }, "");
 renderAccountList();
+
+// Restore whichever screen was showing before the last refresh/close,
+// instead of always dropping back to the account picker.
+const savedLang = localStorage.getItem(ACTIVE_ACCOUNT_KEY);
+if (savedLang && ACCOUNTS.some((a) => a.lang === savedLang)) {
+  currentAccountLang = savedLang;
+  document.getElementById("homeScreen").hidden = true;
+  document.getElementById("app").hidden = false;
+  updateAccountHeader(savedLang);
+  history.pushState({ screen: "schedule", lang: savedLang }, "");
+  refresh();
+} else {
+  refreshHomeScreenBadge();
+}
+
 tickClock();
 setInterval(tickClock, 1000 * 30);
-setInterval(refresh, 1000 * 60 * 5);
+setInterval(() => {
+  refresh();
+  if (!currentAccountLang) refreshHomeScreenBadge();
+}, 1000 * 60 * 5);
 setupPush().catch((e) => console.error("[push] setupPush failed:", e));
