@@ -46,9 +46,24 @@ import random
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps, features as _pil_features
 
 CANVAS_W, CANVAS_H = 1080, 1350       # Instagram portrait
-IMAGE_H = 900                          # photo area height (hook slide, 2:1 photo:panel split)
+IMAGE_H = 900                          # legacy text-anchor boundary (hook slide) - headline/meta
+                                        # positions are still computed off this value so the copy
+                                        # doesn't move, even though the photo itself now runs
+                                        # past it (see HOOK_BLACK_BAR_H below).
 LOGO_SIZE = 140                        # brand logo badge, bottom-right corner
-PANEL_H = CANVAS_H - IMAGE_H           # text panel height
+PANEL_H = CANVAS_H - IMAGE_H           # legacy text panel height (still used for sizing math)
+
+# Hook slide: the solid-black footer is now shrunk down to just a slim
+# strip sized to comfortably hold the logo, vertically centered inside
+# it. Everything above that strip is photo (or generated background) -
+# including the area that used to be solid-black panel behind the
+# headline - so the headline/source text now sits directly over the
+# photo instead of over a black field. Text positions themselves are
+# unchanged (still computed from IMAGE_H/PANEL_H above); only how much
+# of the canvas is "photo" vs. "true black" has changed. Mirrors the
+# English generator's layout exactly (see card_generator.py).
+HOOK_BLACK_BAR_H = 220                 # bottom black strip height (hook slide only)
+HOOK_PHOTO_H = CANVAS_H - HOOK_BLACK_BAR_H  # actual photo/background height on the hook slide
 
 BG_COLOR = (18, 18, 20)                # near-black panel background
 TEXT_COLOR = (245, 245, 245)
@@ -616,12 +631,14 @@ def build_news_card(
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
 
     # --- top: photo (cropped to fill) or a generated gradient background ---
+    # Runs the full HOOK_PHOTO_H now (almost the whole card, stopping only
+    # at the slim black footer that holds the logo) - see HOOK_BLACK_BAR_H.
     is_generated_bg = photo_path is None
     if photo_path:
         photo = Image.open(photo_path).convert("RGB")
-        photo = crop_to_fill(photo, CANVAS_W, IMAGE_H)
+        photo = crop_to_fill(photo, CANVAS_W, HOOK_PHOTO_H)
     else:
-        photo = generate_gradient_background(CANVAS_W, IMAGE_H, tag=tag)
+        photo = generate_gradient_background(CANVAS_W, HOOK_PHOTO_H, tag=tag)
 
     # For serious/sensitive stories (deaths, sexual assault, murder, etc.)
     # the whole background - real photo or generated gradient alike -
@@ -631,14 +648,20 @@ def build_news_card(
     if grayscale:
         photo = ImageOps.grayscale(photo).convert("RGB")
 
-    # slight bottom gradient fade so the top blends into the panel
-    fade = Image.new("L", (CANVAS_W, IMAGE_H), 0)
+    # Bottom gradient fade so the photo darkens progressively behind the
+    # headline/source text (which now sits directly over the photo, not
+    # over a solid black panel) and blends cleanly into the black footer
+    # strip at the very bottom. Fade starts near where the headline text
+    # block begins (IMAGE_H, the legacy text anchor) and reaches full
+    # black exactly at the top of the black footer strip.
+    fade = Image.new("L", (CANVAS_W, HOOK_PHOTO_H), 0)
     fade_draw = ImageDraw.Draw(fade)
-    fade_height = 160
+    fade_start = min(IMAGE_H, HOOK_PHOTO_H)
+    fade_height = HOOK_PHOTO_H - fade_start
     for y in range(fade_height):
         alpha = int(255 * (y / fade_height))
-        fade_draw.line([(0, IMAGE_H - fade_height + y), (CANVAS_W, IMAGE_H - fade_height + y)], fill=alpha)
-    black_layer = Image.new("RGB", (CANVAS_W, IMAGE_H), BG_COLOR)
+        fade_draw.line([(0, fade_start + y), (CANVAS_W, fade_start + y)], fill=alpha)
+    black_layer = Image.new("RGB", (CANVAS_W, HOOK_PHOTO_H), BG_COLOR)
     photo = Image.composite(black_layer, photo, fade)
 
     canvas.paste(photo, (0, 0))
@@ -657,9 +680,9 @@ def build_news_card(
         label_pad = 10
         label_box = [
             CANVAS_W - pad_x - label_w - label_pad * 2,
-            IMAGE_H - 50 - label_h - label_pad * 2,
+            HOOK_PHOTO_H - 50 - label_h - label_pad * 2,
             CANVAS_W - pad_x,
-            IMAGE_H - 50,
+            HOOK_PHOTO_H - 50,
         ]
         overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
         overlay_draw = ImageDraw.Draw(overlay)
@@ -713,8 +736,12 @@ def build_news_card(
     max_text_width = CANVAS_W - 2 * pad_x
     panel_top = IMAGE_H + 45
     meta_y = CANVAS_H - 70
-    logo_reserved_gap = 45
-    logo_top = (CANVAS_H - pad_y) - LOGO_SIZE  # logo sits low, near the true bottom edge
+    logo_reserved_gap = 16
+    # Logo now lives vertically centered inside the slim black footer
+    # strip (HOOK_BLACK_BAR_H) instead of sitting low near the raw bottom
+    # edge, so its top/left are derived from that strip - matches the
+    # English generator's layout.
+    logo_top = (CANVAS_H - HOOK_BLACK_BAR_H) + (HOOK_BLACK_BAR_H - LOGO_SIZE) // 2
     logo_left = CANVAS_W - pad_x - LOGO_SIZE
     panel_bottom_full = CANVAS_H - 90  # top of the source-line divider
     available_h = panel_bottom_full - panel_top
@@ -778,9 +805,12 @@ def build_news_card(
     if highlight_bounds:
         _draw_highlight_ink(canvas, highlight_bounds, headline_font, line_height, text_y, pad_x, max_text_width)
 
-    # --- source / meta line at the bottom of the panel, and the brand logo ---
+    # --- source / meta line above the black footer, and the brand logo ---
+    # The logo is now vertically centered inside the slim black footer
+    # strip (logo_top, computed above) rather than pinned to the raw
+    # bottom edge - matches the English generator's layout.
     meta_font = _load_font(_font_path(font_family, "meta"), 26)
-    logo_bottom_y = CANVAS_H - pad_y
+    logo_bottom_y = logo_top + LOGO_SIZE
     logo_x_gap = 24  # breathing room between the line's end and the logo
     line_end_x = CANVAS_W - pad_x
     if _os.path.exists(HINDI_LOGO_PATH):
