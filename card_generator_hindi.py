@@ -118,7 +118,11 @@ HEADLINE_THEMES = [
     },
     {
         "name": "bronze_gold",
-        "gradient": ["#785c3a", "#e2c29a", "#785c3a", "#ac8e68", "#785c3a"],
+        # Solid color (not a gradient) - all stops identical so the
+        # headline renders as one flat bright gold instead of shading
+        # dark/light across lines. Also drives the tag pill background
+        # (via _pill_colors_from_theme) and the highlight-marker box.
+        "gradient": ["#fac47f", "#fac47f", "#fac47f", "#fac47f", "#fac47f"],
         "logo": _os.path.join(_ASSETS_DIR, "logo_golden.png"),
     },
     {
@@ -410,23 +414,23 @@ def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
         if idx == -1:
             continue
 
-        line_bbox = draw.textbbox((0, 0), line, font=font)
-        line_w = line_bbox[2] - line_bbox[0]
+        line_w = draw.textlength(line, font=font)
 
         prefix = line[:idx]
-        prefix_w = 0
-        if prefix:
-            prefix_bbox = draw.textbbox((0, 0), prefix, font=font)
-            prefix_w = prefix_bbox[2] - prefix_bbox[0]
+        # textlength (not textbbox) - bbox only measures visible ink, so a
+        # trailing space in `prefix` would measure as zero-width and the
+        # box would creep back into that space - textlength uses the
+        # actual glyph advance width instead.
+        prefix_w = draw.textlength(prefix, font=font) if prefix else 0
 
         exact_slice = line[idx: idx + len(highlight_norm)]
-        hl_bbox = draw.textbbox((0, 0), exact_slice, font=font)
-        hl_w = hl_bbox[2] - hl_bbox[0]
+        hl_w = draw.textlength(exact_slice, font=font)
         # Actual ink extent of just this slice (not the font's full
         # ascent+descent line-box, which for Devanagari reserves headroom
         # for tall matras/reph marks well beyond what's in this specific
         # phrase) - sizing the box off this instead of line_height keeps
         # it hugging the visible letters instead of towering over them.
+        hl_bbox = draw.textbbox((0, 0), exact_slice, font=font)
         hl_top, hl_bottom = hl_bbox[1], hl_bbox[3]
 
         return {
@@ -438,20 +442,27 @@ def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
 
 
 def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, text_y: int,
-                         pad_x: int, max_text_width: int, box_color: tuple, font_size: int):
+                         pad_x: int, max_text_width: int, box_color: tuple, font_size: int,
+                         font: ImageFont.FreeTypeFont = None):
     """Paints the sharp-cornered highlighter-marker box, filled with
     box_color (the headline's own gradient color). Must run BEFORE
     _draw_gradient_text. Vertically sized off the highlighted slice's own
     ink bbox (hl_top/hl_bottom), not the line's full font-metric height -
     see _find_highlight_bounds.
 
-    Padding scales with font size instead of a fixed 6px - at headline
-    sizes a flat 6px reads as the glyphs hugging the box edge with the
-    box itself butted up against the neighboring word. Scaling keeps
-    visible breathing room on both sides at every size."""
+    Sized tight to the highlighted text's own ink bounds (no extra
+    padding) - the natural word-space already in the line before/after
+    the phrase is left untouched outside the box, giving a one-space
+    visible gap to neighboring words on each side."""
     i = bounds["line_index"]
     line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
-    h_pad = max(12, round(font_size * 0.16))
+    # The box is sized tight to the highlighted text's own ink bounds
+    # (no horizontal padding added/subtracted) - the natural word-space
+    # already present in the line before/after the highlighted phrase
+    # (exactly one space-character's width, since it's real text layout)
+    # is left untouched outside the box, so that's the visible gap to
+    # the neighboring words on each side.
+    h_pad = 0
     v_pad = max(8, round(font_size * 0.10))
     line_top = text_y + i * line_height
     box = [
@@ -496,17 +507,18 @@ def _draw_gradient_text(canvas: Image.Image, xy, lines, font, line_height, hex_s
     draw = ImageDraw.Draw(canvas)
     line_widths = [draw.textbbox((0, 0), line, font=font)[2] for line in lines]
     max_w = max(line_widths, default=1)
-    text_block_h = line_height * len(lines)
 
-    # Full-height gradient - color only varies by row, so any horizontal
-    # slice of it at a given y is valid, which is what makes per-line
-    # centering with a continuous vertical shimmer possible below.
-    full_gradient = _make_linear_gradient(max_w + 4, text_block_h + 4, hex_stops)
+    # Gradient is rendered once per line's own height (not stretched over
+    # the whole block) so every line gets the full dark->light->dark
+    # shimmer sweep evenly, instead of later lines landing on whatever
+    # darker stop happens to fall at their position in a block-wide
+    # gradient.
+    line_gradient = _make_linear_gradient(max_w + 4, line_height + 4, hex_stops)
 
     for i, (line, line_w) in enumerate(zip(lines, line_widths)):
         mask = Image.new("L", (line_w + 4, line_height + 4), 0)
         ImageDraw.Draw(mask).text((0, 0), line, font=font, fill=255)
-        gradient_slice = full_gradient.crop((0, i * line_height, line_w + 4, i * line_height + line_height + 4))
+        gradient_slice = line_gradient.crop((0, 0, line_w + 4, line_height + 4))
         line_x = x + ((block_width - line_w) // 2 if center and block_width else 0)
         canvas.paste(gradient_slice, (line_x, y + i * line_height), mask)
 
@@ -758,7 +770,7 @@ def build_news_card(
     highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
     if highlight_bounds:
         box_color = _hex_to_rgb(theme["gradient"][0])
-        _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color, headline_font.size)
+        _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color, headline_font.size, font=headline_font)
 
     _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_height, gradient_stops,
                          block_width=max_text_width, center=True)

@@ -11,9 +11,23 @@ import textwrap
 from PIL import Image, ImageDraw, ImageFont, ImageFilter, ImageOps
 
 CANVAS_W, CANVAS_H = 1080, 1350       # Instagram portrait
-IMAGE_H = 900                          # photo area height (hook slide, 2:1 photo:panel split)
+IMAGE_H = 900                          # legacy text-anchor boundary (hook slide) - headline/meta
+                                        # positions are still computed off this value so the copy
+                                        # doesn't move, even though the photo itself now runs
+                                        # past it (see HOOK_BLACK_BAR_H below).
 LOGO_SIZE = 140                        # brand logo badge, bottom-right corner
-PANEL_H = CANVAS_H - IMAGE_H           # text panel height
+PANEL_H = CANVAS_H - IMAGE_H           # legacy text panel height (still used for sizing math)
+
+# Hook slide: the solid-black footer is now shrunk down to just a slim
+# strip sized to comfortably hold the logo, vertically centered inside
+# it. Everything above that strip is photo (or generated background) -
+# including the area that used to be solid-black panel behind the
+# headline - so the headline/source text now sits directly over the
+# photo instead of over a black field. Text positions themselves are
+# unchanged (still computed from IMAGE_H/PANEL_H above); only how much
+# of the canvas is "photo" vs. "true black" has changed.
+HOOK_BLACK_BAR_H = 220                 # bottom black strip height (hook slide only)
+HOOK_PHOTO_H = CANVAS_H - HOOK_BLACK_BAR_H  # actual photo/background height on the hook slide
 
 BG_COLOR = (18, 18, 20)                # near-black panel background
 TEXT_COLOR = (245, 245, 245)
@@ -51,7 +65,11 @@ HEADLINE_THEMES = [
     },
     {
         "name": "bronze_gold",
-        "gradient": ["#785c3a", "#e2c29a", "#785c3a", "#ac8e68", "#785c3a"],
+        # Solid color (not a gradient) - all stops identical so the
+        # headline renders as one flat bright gold instead of shading
+        # dark/light across lines. Also drives the tag pill background
+        # (via _pill_colors_from_theme) and the highlight-marker box.
+        "gradient": ["#fac47f", "#fac47f", "#fac47f", "#fac47f", "#fac47f"],
         "logo": _os.path.join(_ASSETS_DIR, "logo_golden.png"),
     },
     {
@@ -189,7 +207,7 @@ def _wrap_by_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int
 def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: int,
                    max_size: int, min_size: int = 28, variation: str = None,
                    line_spacing_extra: int = 18, step: int = 2, side_margin: int = 0,
-                   keep_phrase: str = None):
+                   keep_phrase: str = None, extra_fit_check=None):
     """
     Picks the LARGEST font size (within [min_size, max_size]) whose
     pixel-wrapped text fits inside max_width x max_height. This makes
@@ -207,6 +225,18 @@ def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: i
     look. With a margin reserved, every line - short or long - keeps at
     least side_margin px of clear space on both sides.
 
+    `extra_fit_check`, if given, is called as extra_fit_check(lines, font,
+    line_h) for each candidate size that already fits max_height, and
+    must return True for that size to be accepted - otherwise the search
+    keeps stepping down. This lets a caller reject a candidate for a
+    reason other than raw height (e.g. the wrapped block would collide
+    with a fixed element like a logo) WITHOUT shrinking max_height itself
+    - shrinking max_height changes the width-driven word-wrap not at all,
+    but can jump the chosen size down a lot more than needed and even
+    flip the line count in unexpected directions. Checking the same
+    width-based wrap at each size in turn keeps line breaks predictable
+    as size decreases.
+
     Returns (font, wrapped_lines, line_height). If even min_size doesn't
     fit, the text is truncated with an ellipsis as a last resort.
     """
@@ -217,7 +247,8 @@ def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: i
         ascent, descent = font.getmetrics()
         line_h = ascent + descent + line_spacing_extra
         if line_h * len(lines) <= max_height:
-            return font, lines, line_h
+            if extra_fit_check is None or extra_fit_check(lines, font, line_h):
+                return font, lines, line_h
 
     font = _load_font(font_path, min_size, variation)
     lines = _wrap_by_width(draw, text, font, wrap_width, keep_phrase=keep_phrase)
@@ -311,26 +342,27 @@ def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
         if idx == -1:
             continue
 
-        line_bbox = draw.textbbox((0, 0), line, font=font)
-        line_w = line_bbox[2] - line_bbox[0]
+        line_w = draw.textlength(line, font=font)
 
         prefix = line[:idx]
-        prefix_w = 0
-        if prefix:
-            prefix_bbox = draw.textbbox((0, 0), prefix, font=font)
-            prefix_w = prefix_bbox[2] - prefix_bbox[0]
+        # textlength (not textbbox) - bbox only measures visible ink, so a
+        # trailing space in `prefix` (there always is one here, since the
+        # highlight starts mid-line after a preceding word) would measure
+        # as zero-width and the box would creep back into that space -
+        # textlength uses the actual glyph advance width instead.
+        prefix_w = draw.textlength(prefix, font=font) if prefix else 0
 
         # Use the ORIGINAL-case slice from the line (not `highlight` itself)
         # so glyph widths/rendering match exactly what's actually drawn.
         exact_slice = line[idx: idx + len(highlight_norm)]
-        hl_bbox = draw.textbbox((0, 0), exact_slice, font=font)
-        hl_w = hl_bbox[2] - hl_bbox[0]
+        hl_w = draw.textlength(exact_slice, font=font)
         # top/bottom are the SLICE's actual ink extent (not the font's full
         # ascent+descent line-box, which is padded well beyond the ink -
         # especially for Devanagari, whose metrics reserve headroom for
         # tall matras/reph marks that may not even be present in this
         # particular phrase). Sizing the box off this instead of
         # line_height keeps it hugging the visible letters.
+        hl_bbox = draw.textbbox((0, 0), exact_slice, font=font)
         hl_top, hl_bottom = hl_bbox[1], hl_bbox[3]
 
         return {
@@ -342,7 +374,8 @@ def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
 
 
 def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, text_y: int,
-                         pad_x: int, max_text_width: int, box_color: tuple, font_size: int):
+                         pad_x: int, max_text_width: int, box_color: tuple, font_size: int,
+                         font: ImageFont.FreeTypeFont = None):
     """
     Paints a sharp-cornered "highlighter marker" box on the canvas at the
     position described by `bounds` (from _find_highlight_bounds), filled
@@ -359,11 +392,13 @@ def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, tex
     """
     i = bounds["line_index"]
     line_x = pad_x + (max_text_width - bounds["line_w"]) // 2  # matches _draw_gradient_text's centering
-    # Padding scales with font size instead of a fixed 6px - at headline
-    # sizes (56-162px) a flat 6px reads as the glyphs hugging the box
-    # edge with the box itself butted up against the neighboring word.
-    # Scaling keeps visible breathing room on both sides at every size.
-    h_pad = max(12, round(font_size * 0.16))
+    # The box is sized tight to the highlighted text's own ink bounds
+    # (no horizontal padding added/subtracted) - the natural word-space
+    # already present in the line before/after the highlighted phrase
+    # (exactly one space-character's width, since it's real text layout)
+    # is left untouched outside the box, so that's the visible gap to
+    # "on"/"for" etc. on each side.
+    h_pad = 0
     v_pad = max(8, round(font_size * 0.10))
     line_top = text_y + i * line_height
     box = [
@@ -410,17 +445,18 @@ def _draw_gradient_text(canvas: Image.Image, xy, lines, font, line_height, hex_s
     draw = ImageDraw.Draw(canvas)
     line_widths = [draw.textbbox((0, 0), line, font=font)[2] for line in lines]
     max_w = max(line_widths, default=1)
-    text_block_h = line_height * len(lines)
 
-    # Full-height gradient - color only varies by row, so any horizontal
-    # slice of it at a given y is valid, which is what makes per-line
-    # centering with a continuous vertical shimmer possible below.
-    full_gradient = _make_linear_gradient(max_w + 4, text_block_h + 4, hex_stops)
+    # Gradient is rendered once per line's own height (not stretched over
+    # the whole block) so every line gets the full dark->light->dark
+    # shimmer sweep evenly, instead of later lines landing on whatever
+    # darker stop happens to fall at their position in a block-wide
+    # gradient.
+    line_gradient = _make_linear_gradient(max_w + 4, line_height + 4, hex_stops)
 
     for i, (line, line_w) in enumerate(zip(lines, line_widths)):
         mask = Image.new("L", (line_w + 4, line_height + 4), 0)
         ImageDraw.Draw(mask).text((0, 0), line, font=font, fill=255)
-        gradient_slice = full_gradient.crop((0, i * line_height, line_w + 4, i * line_height + line_height + 4))
+        gradient_slice = line_gradient.crop((0, 0, line_w + 4, line_height + 4))
         line_x = x + ((block_width - line_w) // 2 if center and block_width else 0)
         canvas.paste(gradient_slice, (line_x, y + i * line_height), mask)
 
@@ -503,12 +539,14 @@ def build_news_card(
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
 
     # --- top: photo (cropped to fill) or a generated gradient background ---
+    # Runs the full HOOK_PHOTO_H now (almost the whole card, stopping only
+    # at the slim black footer that holds the logo) - see HOOK_BLACK_BAR_H.
     is_generated_bg = photo_path is None
     if photo_path:
         photo = Image.open(photo_path).convert("RGB")
-        photo = crop_to_fill(photo, CANVAS_W, IMAGE_H)
+        photo = crop_to_fill(photo, CANVAS_W, HOOK_PHOTO_H)
     else:
-        photo = generate_gradient_background(CANVAS_W, IMAGE_H, tag=tag)
+        photo = generate_gradient_background(CANVAS_W, HOOK_PHOTO_H, tag=tag)
 
     # For serious/sensitive stories (deaths, sexual assault, murder, etc.)
     # the whole background - real photo or generated gradient alike -
@@ -518,14 +556,20 @@ def build_news_card(
     if grayscale:
         photo = ImageOps.grayscale(photo).convert("RGB")
 
-    # slight bottom gradient fade so the top blends into the panel
-    fade = Image.new("L", (CANVAS_W, IMAGE_H), 0)
+    # Bottom gradient fade so the photo darkens progressively behind the
+    # headline/source text (which now sits directly over the photo, not
+    # over a solid black panel) and blends cleanly into the black footer
+    # strip at the very bottom. Fade starts near where the headline text
+    # block begins (IMAGE_H, the legacy text anchor) and reaches full
+    # black exactly at the top of the black footer strip.
+    fade = Image.new("L", (CANVAS_W, HOOK_PHOTO_H), 0)
     fade_draw = ImageDraw.Draw(fade)
-    fade_height = 160
+    fade_start = min(IMAGE_H, HOOK_PHOTO_H)
+    fade_height = HOOK_PHOTO_H - fade_start
     for y in range(fade_height):
         alpha = int(255 * (y / fade_height))
-        fade_draw.line([(0, IMAGE_H - fade_height + y), (CANVAS_W, IMAGE_H - fade_height + y)], fill=alpha)
-    black_layer = Image.new("RGB", (CANVAS_W, IMAGE_H), BG_COLOR)
+        fade_draw.line([(0, fade_start + y), (CANVAS_W, fade_start + y)], fill=alpha)
+    black_layer = Image.new("RGB", (CANVAS_W, HOOK_PHOTO_H), BG_COLOR)
     photo = Image.composite(black_layer, photo, fade)
 
     canvas.paste(photo, (0, 0))
@@ -547,9 +591,9 @@ def build_news_card(
         label_pad = 10
         label_box = [
             CANVAS_W - pad_x - label_w - label_pad * 2,
-            IMAGE_H - 50 - label_h - label_pad * 2,
+            HOOK_PHOTO_H - 50 - label_h - label_pad * 2,
             CANVAS_W - pad_x,
-            IMAGE_H - 50,
+            HOOK_PHOTO_H - 50,
         ]
         overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
         overlay_draw = ImageDraw.Draw(overlay)
@@ -594,49 +638,49 @@ def build_news_card(
     # to fit, and the block is vertically centered in that panel.
     #
     # The logo badge sits bottom-right, above the source line. It only
-    # occupies a 140x140 corner, not the full width - so we don't reserve
-    # its height across the whole panel up front (that wasted a lot of
-    # vertical space on every card, forcing headlines smaller than they
-    # needed to be). Instead: fit against the FULL panel height first,
-    # then only if the actual last line's rendered box would genuinely
-    # overlap the logo's corner, refit against a height that avoids it.
+    # occupies a 140x140 corner, not the full width, so the fit check
+    # below only rejects a candidate size when its LAST line would
+    # actually run into that corner - most centered lines never reach
+    # that far right, so most headlines fit against the full panel
+    # height untouched. When a candidate does collide, the search just
+    # steps down to the next smaller size (same width-driven word wrap,
+    # so line breaks stay predictable) instead of shrinking the height
+    # budget - shrinking the height was flipping 3 shorter lines into 2
+    # much-wider, much-smaller ones to squeeze above the logo, which is
+    # exactly the cramped look this is meant to avoid.
     max_text_width = CANVAS_W - 2 * pad_x
     panel_top = IMAGE_H + 45
     meta_y = CANVAS_H - 70
-    logo_reserved_gap = 45
-    logo_top = (CANVAS_H - pad_y) - LOGO_SIZE  # logo now sits low, near the true bottom edge
+    logo_reserved_gap = 16
+    # Logo now lives vertically centered inside the slim black footer
+    # strip (HOOK_BLACK_BAR_H) instead of sitting low near the raw bottom
+    # edge, so its top/left are derived from that strip.
+    logo_top = (CANVAS_H - HOOK_BLACK_BAR_H) + (HOOK_BLACK_BAR_H - LOGO_SIZE) // 2
     logo_left = CANVAS_W - pad_x - LOGO_SIZE
     panel_bottom_full = CANVAS_H - 90  # top of the source-line divider
     available_h = panel_bottom_full - panel_top
 
+    def _clears_logo(lines, font, line_h):
+        if not (_os.path.exists(theme["logo"]) and lines):
+            return True
+        block_h = line_h * len(lines)
+        text_y = panel_top + max(0, (available_h - block_h) // 2)
+        last_line_bottom = text_y + block_h
+        if last_line_bottom <= logo_top - logo_reserved_gap:
+            return True
+        last_line_bbox = draw.textbbox((0, 0), lines[-1], font=font)
+        last_line_w = last_line_bbox[2] - last_line_bbox[0]
+        last_line_x_end = pad_x + (max_text_width - last_line_w) // 2 + last_line_w
+        return last_line_x_end <= logo_left - logo_reserved_gap
+
     headline_font_path = headline_font
     headline_font, wrapped, line_height = _autofit_text(
         draw, headline, headline_font_path, max_text_width, available_h,
-        max_size=162, min_size=56, variation="Bold", line_spacing_extra=10,
-        side_margin=24, keep_phrase=highlight,
+        max_size=210, min_size=48, variation="Bold", line_spacing_extra=10,
+        side_margin=24, keep_phrase=highlight, extra_fit_check=_clears_logo,
     )
     block_h = line_height * len(wrapped)
     text_y = panel_top + max(0, (available_h - block_h) // 2)
-
-    if _os.path.exists(theme["logo"]) and wrapped:
-        last_line_bottom = text_y + line_height * len(wrapped)
-        if last_line_bottom > logo_top - logo_reserved_gap:
-            last_line_bbox = draw.textbbox((0, 0), wrapped[-1], font=headline_font)
-            last_line_w = last_line_bbox[2] - last_line_bbox[0]
-            last_line_x_start = pad_x + (max_text_width - last_line_w) // 2
-            last_line_x_end = last_line_x_start + last_line_w
-            # Only re-fit into the smaller box if the last line would
-            # actually reach into the logo's horizontal corner too -
-            # most centered short lines never get that far right.
-            if last_line_x_end > logo_left - logo_reserved_gap:
-                available_h = (logo_top - logo_reserved_gap) - panel_top
-                headline_font, wrapped, line_height = _autofit_text(
-                    draw, headline, headline_font_path, max_text_width, available_h,
-                    max_size=162, min_size=56, variation="Bold", line_spacing_extra=10,
-                    side_margin=24, keep_phrase=highlight,
-                )
-                block_h = line_height * len(wrapped)
-                text_y = panel_top + max(0, (available_h - block_h) // 2)
 
     # _autofit_text steps the font size down in fixed increments, and word
     # wrap can jump from N to N+1 lines right at the step where a bigger
@@ -668,7 +712,7 @@ def build_news_card(
     highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
     if highlight_bounds:
         box_color = _hex_to_rgb(theme["gradient"][0])
-        _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color, headline_font.size)
+        _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color, headline_font.size, font=headline_font)
 
     _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_height, gradient_stops,
                          block_width=max_text_width, center=True)
@@ -676,14 +720,14 @@ def build_news_card(
     if highlight_bounds:
         _draw_highlight_ink(canvas, highlight_bounds, headline_font, line_height, text_y, pad_x, max_text_width)
 
-    # --- source / meta line at the bottom of the panel, and the brand logo ---
-    # Logo sits low, close to the true bottom edge (same margin as pad_x/pad_y
-    # elsewhere), rather than stacked right above the divider - this frees up
-    # a lot more of the panel above for the headline. The divider line stops
-    # short of the logo's footprint instead of running a full-width line
-    # straight past/under it.
+    # --- source / meta line above the black footer, and the brand logo ---
+    # The logo is now vertically centered inside the slim black footer
+    # strip (logo_top, computed above) rather than pinned to the raw
+    # bottom edge. The divider/source line stays at its original position
+    # (meta_y, unchanged) and still stops short of the logo's footprint
+    # instead of running a full-width line straight past/under it.
     meta_font = _load_font(FONT_META, 26, variation="Bold")
-    logo_bottom_y = CANVAS_H - pad_y
+    logo_bottom_y = logo_top + LOGO_SIZE
     logo_x_gap = 24  # breathing room between the line's end and the logo
     line_end_x = CANVAS_W - pad_x
     if _os.path.exists(theme["logo"]):
@@ -691,7 +735,7 @@ def build_news_card(
     draw.line([(pad_x, meta_y - 20), (line_end_x, meta_y - 20)], fill=(60, 60, 64), width=2)
     draw.text((pad_x, meta_y), source.upper(), font=meta_font, fill=MUTED_COLOR)
 
-    # --- brand logo, bottom-right corner (square badge) ---
+    # --- brand logo, vertically centered in the black footer strip ---
     if _os.path.exists(theme["logo"]):
         _draw_logo(canvas, pad_x, logo_bottom_y, logo_size=LOGO_SIZE,
                    logo_path=_os.path.join(_ASSETS_DIR, "logo_black_white.png") if grayscale else theme["logo"])
