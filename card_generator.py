@@ -4,6 +4,7 @@ Takes a downloaded news photo + headline/source text and composites a
 clean, consistent "news card" image (1080x1350, Instagram portrait ratio).
 Pure Pillow — no AI involved, so it's deterministic and never garbles text.
 """
+import colorsys
 import os as _os
 import platform as _platform
 import random
@@ -60,8 +61,13 @@ _ASSETS_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "asset
 HEADLINE_THEMES = [
     {
         "name": "silver",
+        # "gradient" still drives the tag pill / highlight-box color (via
+        # _pill_colors_from_theme and theme["gradient"][0]) - unchanged.
+        # The actual headline TEXT for this theme (logo_black_white) is
+        # forced to plain bright white below, via headline_color_mode.
         "gradient": ["#858489", "#e7e4ef", "#858489", "#b9b9b9", "#858489"],
         "logo": _os.path.join(_ASSETS_DIR, "logo_black_white.png"),
+        "headline_color_mode": "white",
     },
     {
         "name": "bronze_gold",
@@ -69,13 +75,19 @@ HEADLINE_THEMES = [
         # headline renders as one flat bright gold instead of shading
         # dark/light across lines. Also drives the tag pill background
         # (via _pill_colors_from_theme) and the highlight-marker box.
+        # Left as-is - this is the "keep it same" theme.
         "gradient": ["#fac47f", "#fac47f", "#fac47f", "#fac47f", "#fac47f"],
         "logo": _os.path.join(_ASSETS_DIR, "logo_golden.png"),
     },
     {
         "name": "warm_taupe",
+        # "gradient" still drives the tag pill / highlight-box color -
+        # unchanged. The headline TEXT for this theme (logo_silver) is a
+        # fixed plain solid color (no gradient) - see headline_color_mode.
         "gradient": ["#8b806f", "#e8decc", "#8b806f", "#b3ae9a", "#8d8c88"],
         "logo": _os.path.join(_ASSETS_DIR, "logo_silver.png"),
+        "headline_color_mode": "solid",
+        "headline_solid_color": "#dbd2b4",
     },
 ]
 
@@ -94,6 +106,25 @@ def _pill_colors_from_theme(theme: dict) -> tuple:
 def _hex_to_rgb(hex_color: str) -> tuple:
     hex_color = hex_color.lstrip("#")
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+def _photo_accent_color(img: Image.Image) -> str:
+    """Samples a plain solid headline color from a photo's own dominant
+    hue (used by the 'warm_taupe'/logo_silver theme instead of its fixed
+    gradient). Averages the photo down to one RGB, then boosts
+    saturation/lightness so it stays a legible bright color over the
+    photo's darkened lower portion instead of a muddy literal average."""
+    small = img.convert("RGB").resize((32, 32))
+    pixels = list(small.getdata())
+    n = len(pixels)
+    r = sum(p[0] for p in pixels) / n
+    g = sum(p[1] for p in pixels) / n
+    b = sum(p[2] for p in pixels) / n
+    h, l, s = colorsys.rgb_to_hls(r / 255, g / 255, b / 255)
+    s = max(s, 0.55)
+    l = min(max(l, 0.62), 0.82)
+    r2, g2, b2 = colorsys.hls_to_rgb(h, l, s)
+    return "#%02x%02x%02x" % (int(r2 * 255), int(g2 * 255), int(b2 * 255))
 
 
 # --- fonts -------------------------------------------------------------
@@ -429,6 +460,38 @@ def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: in
     )
 
 
+def _draw_top_line_backdrop(canvas: Image.Image, wrapped: list, font: ImageFont.FreeTypeFont,
+                             line_height: int, text_y: int, pad_x: int, max_text_width: int):
+    """
+    When the headline wraps to 2+ lines, the topmost line sits higher in
+    the photo panel where the bottom-fade (see build_news_card) hasn't
+    darkened the photo much yet, so it can run low-contrast against a
+    busy/bright photo. This paints a solid black, sharp-cornered backdrop
+    box behind just that top line (sized to its own text width, not a
+    full-width bar) so it stays legible. Lower lines already sit on
+    darker, more-faded photo and don't get one. No-op for single-line
+    headlines. Must be called BEFORE the headline text itself is drawn,
+    so the text paints on top of this box (mirrors _draw_highlight_box's
+    draw-order requirement).
+    """
+    if len(wrapped) < 2:
+        return
+    draw = ImageDraw.Draw(canvas)
+    first_line = wrapped[0]
+    bbox = draw.textbbox((0, 0), first_line, font=font)
+    line_w, ink_top, ink_bottom = bbox[2], bbox[1], bbox[3]
+    line_x = pad_x + (max_text_width - line_w) // 2
+    h_pad = max(6, round(font.size * 0.08))
+    v_pad = max(3, round(font.size * 0.04))
+    box = [
+        line_x - h_pad,
+        text_y + ink_top - v_pad,
+        line_x + line_w + h_pad,
+        text_y + ink_bottom + v_pad,
+    ]
+    draw.rectangle(box, fill=(0, 0, 0))
+
+
 def _draw_gradient_text(canvas: Image.Image, xy, lines, font, line_height, hex_stops, block_width=None, center=False):
     """
     Renders wrapped text lines filled with a vertical gradient (sampled
@@ -555,6 +618,15 @@ def build_news_card(
     # than sharing the same bright/colorful treatment as routine news.
     if grayscale:
         photo = ImageOps.grayscale(photo).convert("RGB")
+
+    # Sampled here (before the bottom-fade below darkens the photo) so an
+    # "image" headline_color_mode reflects the actual photo's own color,
+    # not the near-black gradient overlay composited over it further down.
+    photo_accent_hex = (
+        _photo_accent_color(photo)
+        if theme.get("headline_color_mode") == "image" and not grayscale
+        else None
+    )
 
     # Bottom gradient fade so the photo darkens progressively behind the
     # headline/source text (which now sits directly over the photo, not
@@ -697,7 +769,21 @@ def build_news_card(
 
     # Grayscale cards get a plain white/light-gray headline instead of
     # the day's theme color, keeping the whole card black-and-white.
-    gradient_stops = ["#ffffff", "#e0e0e0", "#ffffff", "#f2f2f2", "#ffffff"] if grayscale else theme["gradient"]
+    # Otherwise, headline color follows the theme's headline_color_mode:
+    # "white" -> flat plain white (logo_black_white theme), "image" ->
+    # flat color sampled from this card's own photo (logo_silver theme),
+    # unset/"gradient" -> the theme's normal gradient (logo_golden theme).
+    color_mode = theme.get("headline_color_mode", "gradient")
+    if grayscale:
+        gradient_stops = ["#ffffff", "#e0e0e0", "#ffffff", "#f2f2f2", "#ffffff"]
+    elif color_mode == "white":
+        gradient_stops = ["#ffffff"] * 5
+    elif color_mode == "image" and photo_accent_hex:
+        gradient_stops = [photo_accent_hex] * 5
+    elif color_mode == "solid":
+        gradient_stops = [theme.get("headline_solid_color", "#ffffff")] * 5
+    else:
+        gradient_stops = theme["gradient"]
 
     # Highlighter-marker box + solid-black ink overlay behind/over the
     # AI-picked phrase, if any. Skipped for grayscale/sensitive cards - see
@@ -710,6 +796,9 @@ def build_news_card(
     # reads as solid black text on its own-color box, not blended into the
     # gradient headline color).
     highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
+
+    _draw_top_line_backdrop(canvas, wrapped, headline_font, line_height, text_y, pad_x, max_text_width)
+
     if highlight_bounds:
         box_color = _hex_to_rgb(theme["gradient"][0])
         _draw_highlight_box(canvas, highlight_bounds, line_height, text_y, pad_x, max_text_width, box_color, headline_font.size, font=headline_font)
