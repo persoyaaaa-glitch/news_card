@@ -446,7 +446,12 @@ function updateGenerateBlock(slot) {
   const isGenerating = generatingSlotIndices.has(slot.index);
   btn.disabled = isGenerating;
   btn.textContent = isGenerating ? "Generating..." : "Generate content now";
-  if (!isGenerating) status.textContent = "";
+  // Only clear the status line when nothing has been said yet (e.g. the
+  // modal just opened). Don't wipe an error message that generateSlotNow
+  // just set on a failed start - that was clobbering "Couldn't start: ..."
+  // with an empty string the instant the button reverted, so the error
+  // never had a chance to be seen.
+  if (!isGenerating && !status.dataset.errorShown) status.textContent = "";
   btn.onclick = () => generateSlotNow(slot, status);
 }
 
@@ -459,14 +464,20 @@ async function generateSlotNow(slot, statusEl) {
   if (!currentDateStr || generatingSlotIndices.has(slot.index)) return;
 
   generatingSlotIndices.add(slot.index);
-  if (statusEl) statusEl.textContent = "Starting...";
+  if (statusEl) {
+    statusEl.textContent = "Starting...";
+    delete statusEl.dataset.errorShown;
+  }
   render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
   if (currentModalSlot && currentModalSlot.index === slot.index) updateGenerateBlock(currentModalSlot);
 
   const result = await triggerGenerateSlot(currentDateStr, slot.index);
   if (!result.ok) {
     generatingSlotIndices.delete(slot.index);
-    if (statusEl) statusEl.textContent = `Couldn't start: ${result.error}`;
+    if (statusEl) {
+      statusEl.textContent = `Couldn't start: ${result.error}`;
+      statusEl.dataset.errorShown = "1";
+    }
     render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
     if (currentModalSlot && currentModalSlot.index === slot.index) updateGenerateBlock(currentModalSlot);
     return;
@@ -542,6 +553,7 @@ function openModal(slot) {
 
   renderModalLang(currentModalLang);
   populateStoryList(slot);
+  delete document.getElementById("generateStatus").dataset.errorShown;
   updateGenerateBlock(slot);
 
   const reviewBtn = document.getElementById("reviewBtn");
