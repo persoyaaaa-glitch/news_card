@@ -371,7 +371,7 @@ def _rebalance_last_line(draw, lines_tokens: list, font: ImageFont.FreeTypeFont,
 
 def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: int,
                    max_size: int, min_size: int, line_spacing_extra: int, step: int = 2,
-                   side_margin: int = 0, keep_phrase: str = None):
+                   side_margin: int = 0, keep_phrase: str = None, extra_fit_check=None):
     """
     Picks the LARGEST font size (within [min_size, max_size]) whose
     pixel-wrapped text fits inside max_width x max_height. This makes
@@ -389,6 +389,19 @@ def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: i
     look. With a margin reserved, every line - short or long - keeps at
     least side_margin px of clear space on both sides.
 
+    `extra_fit_check`, if given, is called as extra_fit_check(lines, font,
+    line_h) for each candidate size that already fits max_height, and
+    must return True for that size to be accepted - otherwise the search
+    keeps stepping down. This lets a caller reject a candidate for a
+    reason other than raw height (e.g. the wrapped block would collide
+    with a fixed element like a logo) WITHOUT shrinking side_margin for
+    every line just to keep one line short - side_margin narrows the
+    wrap width for the WHOLE block, so using it to dodge a corner badge
+    starves every other line of width it never needed to give up.
+    Stepping the font size down instead keeps every line using the full
+    available width at whatever size is chosen. Mirrors
+    card_generator.py's implementation exactly.
+
     Returns (font, wrapped_lines, line_height). If even min_size doesn't
     fit, the text is truncated with an ellipsis as a last resort.
     """
@@ -399,7 +412,8 @@ def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: i
         ascent, descent = font.getmetrics()
         line_h = ascent + descent + line_spacing_extra
         if line_h * len(lines) <= max_height:
-            return font, lines, line_h
+            if extra_fit_check is None or extra_fit_check(lines, font, line_h):
+                return font, lines, line_h
 
     font = _load_font(font_path, min_size)
     lines = _wrap_by_width(draw, text, font, wrap_width, keep_phrase=keep_phrase)
@@ -519,14 +533,34 @@ def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
     return None
 
 
+def _highlight_on_backdrop_line(bounds: dict, wrapped: list) -> bool:
+    """True if the highlighted phrase sits on the headline's TOP line
+    while that same line also carries the translucent black backdrop box
+    from _draw_top_line_backdrop (drawn whenever the headline wraps to
+    2+ lines - see that function). In that case the highlighter box/ink
+    is skipped entirely and the phrase just renders in the headline's
+    normal color - stacking the highlight marker on top of the backdrop
+    box reads as a muddy double-layer instead of a clean highlighter
+    mark, since the backdrop already darkens everything on that line,
+    highlighted or not. Mirrors card_generator.py's helper of the same
+    name."""
+    return bool(bounds) and len(wrapped) > 1 and bounds["line_index"] == 0
+
+
 def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, text_y: int,
                          pad_x: int, max_text_width: int, box_color: tuple, font_size: int,
-                         font: ImageFont.FreeTypeFont = None):
-    """Paints the sharp-cornered highlighter-marker box, filled with
+                         font: ImageFont.FreeTypeFont = None, opacity: float = 0.6):
+    """Paints the sharp-cornered highlighter-marker box, tinted with
     box_color (the headline's own gradient color). Must run BEFORE
     _draw_gradient_text. Vertically sized off the highlighted slice's own
     ink bbox (hl_top/hl_bottom), not the line's full font-metric height -
-    see _find_highlight_bounds.
+    see _find_highlight_bounds. Mirrors card_generator.py's helper of the
+    same name exactly, including the translucent (not flat-opaque) box.
+
+    opacity: 0-1 alpha for the box (0.6 = 60% opaque, i.e. the photo/
+    headline panel underneath still shows through at 40% strength) -
+    done via crop + alpha-blend against a solid box_color layer, same
+    technique as _draw_top_line_backdrop, rather than a flat opaque fill.
 
     Sized tight to the highlighted text's own ink bounds (no extra
     padding) - the natural word-space already in the line before/after
@@ -535,7 +569,13 @@ def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, tex
     i = bounds["line_index"]
     line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
     h_pad = 0
-    v_pad = max(8, round(font_size * 0.10))
+    # v_pad formula matches _draw_top_line_backdrop's exactly (max(3,
+    # round(font_size * 0.04))) so both boxes read as the same visual
+    # "thickness" around their text - they used to use different
+    # formulas (this one was max(8, round(font_size * 0.10))), which
+    # made the highlighter box noticeably chunkier than the backdrop box.
+    # Mirrors card_generator.py exactly.
+    v_pad = max(3, round(font_size * 0.04))
     line_top = text_y + i * line_height
     box = [
         line_x + bounds["prefix_w"] - h_pad,
@@ -543,8 +583,16 @@ def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, tex
         line_x + bounds["prefix_w"] + bounds["hl_w"] + h_pad,
         line_top + bounds["hl_bottom"] + v_pad,
     ]
-    draw = ImageDraw.Draw(canvas)
-    draw.rectangle(box, fill=box_color)
+    box = [
+        int(max(0, box[0])), int(max(0, box[1])),
+        int(min(canvas.width, box[2])), int(min(canvas.height, box[3])),
+    ]
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return
+    region = canvas.crop(box)
+    color_layer = Image.new("RGB", region.size, box_color)
+    blended = Image.blend(region, color_layer, opacity)
+    canvas.paste(blended, box)
 
 
 def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: int, text_y: int,
@@ -564,17 +612,25 @@ def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: in
 
 
 def _draw_top_line_backdrop(canvas: Image.Image, wrapped: list, font: ImageFont.FreeTypeFont,
-                             line_height: int, text_y: int, pad_x: int, max_text_width: int):
+                             line_height: int, text_y: int, pad_x: int, max_text_width: int,
+                             opacity: float = 0.4):
     """
     When the headline wraps to 2+ lines, the topmost line sits higher in
     the photo panel where the bottom-fade (see build_news_card) hasn't
     darkened the photo much yet, so it can run low-contrast against a
-    busy/bright photo. This paints a solid black, sharp-cornered backdrop
-    box behind just that top line (sized to its own text width, not a
+    busy/bright photo. This paints a black, sharp-cornered backdrop box
+    behind just that top line (sized to its own text width, not a
     full-width bar) so it stays legible. Lower lines already sit on
     darker, more-faded photo and don't get one. No-op for single-line
     headlines. Must be called BEFORE the headline text itself is drawn.
-    Mirrors card_generator.py's helper of the same name.
+    Mirrors card_generator.py's helper of the same name exactly, including
+    the translucent (not flat-opaque) box.
+
+    opacity: 0-1 alpha for the black box (0.4 = 40% opaque, i.e. the
+    photo underneath still shows through at 60% strength) - the canvas is
+    plain RGB (no alpha channel), so this is done by cropping the box
+    region and alpha-blending it against a solid black layer rather than
+    a flat-fill rectangle.
     """
     if len(wrapped) < 2:
         return
@@ -591,7 +647,16 @@ def _draw_top_line_backdrop(canvas: Image.Image, wrapped: list, font: ImageFont.
         line_x + line_w + h_pad,
         text_y + ink_bottom + v_pad,
     ]
-    draw.rectangle(box, fill=(0, 0, 0))
+    box = [
+        int(max(0, box[0])), int(max(0, box[1])),
+        int(min(canvas.width, box[2])), int(min(canvas.height, box[3])),
+    ]
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return
+    region = canvas.crop(box)
+    black_layer = Image.new("RGB", region.size, (0, 0, 0))
+    blended = Image.blend(region, black_layer, opacity)
+    canvas.paste(blended, box)
 
 
 def _draw_gradient_text(canvas: Image.Image, xy, lines, font, line_height, hex_stops, block_width=None, center=False):
@@ -912,19 +977,31 @@ def build_news_card(
                     # Rebalancing alone couldn't clear it (previous line
                     # has no slack left, usually because the headline is
                     # long enough to need 3 lines to dodge the logo at
-                    # all) - fall back to re-wrapping the whole block at
-                    # a narrower width. _autofit_text tries every size
-                    # from max_size down before ever touching min_size,
-                    # so this still renders at 60 whenever 60 fits; the
-                    # floor matches the first pass (48) as a last resort
-                    # so a genuinely long headline gets a smaller-but-
-                    # whole headline instead of an ellipsis - dropping
-                    # words is worse than a few points of font size.
-                    logo_side_margin = max(16, (max_text_width - safe_last_line_w) // 2 + 1)
+                    # all). Re-fit by stepping the font size DOWN instead
+                    # of narrowing side_margin - side_margin narrows the
+                    # wrap width for every line in the block, so using it
+                    # here to shrink just the last line ends up starving
+                    # every OTHER line of width it never needed to give
+                    # up too (they'd wrap short and sit centered with a
+                    # lot of unused space on both sides - the bug this
+                    # replaced). extra_fit_check keeps side_margin at the
+                    # original 16px for every candidate size and only
+                    # accepts a size once its own last line naturally
+                    # clears the logo corner at that size's own width, so
+                    # every line - including the last - always uses as
+                    # much of the panel's width as its font size allows.
+                    def _clears_logo(lines, font, line_h):
+                        if not lines:
+                            return True
+                        last_bbox = draw.textbbox((0, 0), lines[-1], font=font)
+                        last_w = last_bbox[2] - last_bbox[0]
+                        last_x_end = pad_x + (max_text_width - last_w) // 2 + last_w
+                        return last_x_end <= logo_left - logo_reserved_gap
+
                     headline_font, wrapped, line_height = _autofit_text(
                         draw, headline, headline_font_path, max_text_width, available_h,
-                        max_size=190, min_size=48, line_spacing_extra=9, side_margin=logo_side_margin,
-                        keep_phrase=highlight,
+                        max_size=190, min_size=48, line_spacing_extra=9, side_margin=16,
+                        keep_phrase=highlight, extra_fit_check=_clears_logo,
                     )
                     block_h = line_height * len(wrapped)
                     text_y = panel_top + max(0, (available_h - block_h) // 2)
@@ -962,19 +1039,12 @@ def build_news_card(
         gradient_stops = theme["gradient"]
 
     highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
-    # If the headline wrapped to more than one line AND the highlighted
-    # phrase happens to be the ENTIRE content of its line (nothing before
-    # or after it there), skip the box/ink treatment rather than paint a
-    # bar edge-to-edge across that line - a full-width box on the top
-    # line of a multi-line headline reads as a heavy, ugly slab, not a
-    # highlighter mark, since there's no surrounding un-highlighted text
-    # on that line to show the box "picking out" a phrase from. The
-    # phrase still renders, just in the normal gradient color like the
-    # rest of the headline instead of getting the box+black-ink treatment.
-    if highlight_bounds and len(wrapped) > 1:
-        suffix_w = highlight_bounds["line_w"] - highlight_bounds["prefix_w"] - highlight_bounds["hl_w"]
-        if highlight_bounds["prefix_w"] <= 2 and suffix_w <= 2:
-            highlight_bounds = None
+    # Never draw the highlighter box/ink over the top-line black backdrop
+    # (see _highlight_on_backdrop_line) - only text that's sitting
+    # directly on the photo gets the highlighter treatment. Mirrors
+    # card_generator.py exactly.
+    if _highlight_on_backdrop_line(highlight_bounds, wrapped):
+        highlight_bounds = None
 
     _draw_top_line_backdrop(canvas, wrapped, headline_font, line_height, text_y, pad_x, max_text_width)
 

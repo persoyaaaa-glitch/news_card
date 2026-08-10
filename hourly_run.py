@@ -16,8 +16,10 @@ Flow:
      "ILLUSTRATIVE IMAGE" label since they're not the real story photo.
   5. Build a carousel: slide 1 is the eye-catching hook (photo + short
      headline), slides 2+ are real informational content extracted from
-     the article, with a duotone-tinted version of the same photo. Falls
-     back to a single-image post if no real body text could be extracted.
+     the article, with a duotone-tinted version of the same photo. Both
+     the hook and at least one description slide are mandatory - if no
+     real body text could be extracted, the story is skipped entirely
+     rather than posting a hook-only single image.
   6. Upload each slide to Supabase Storage to get public URLs
      (Instagram's API requires URLs, not raw files).
   7. Publish directly to Instagram via the Graph API (carousel or single
@@ -118,7 +120,9 @@ GENERATED_BG_RATIO = 0.0
 
 # How many informational slides to try to build after the hook slide
 # (actual count may be lower if the article doesn't yield enough real
-# text - the pipeline falls back to a single-image post in that case).
+# text for all of them - but at least ONE description slide is still
+# mandatory: if the article yields none at all, _build_post skips the
+# story entirely instead of posting a hook-only single image).
 NUM_INFO_SLIDES = 3
 
 # Max random delay (seconds) added before each run, so posts land at
@@ -306,8 +310,16 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
         else:
             slide_texts = get_carousel_slide_texts(article_url, num_slides=NUM_INFO_SLIDES)
             detail_text = slide_texts[0] if slide_texts else None
-    if not slide_texts and verbose:
-        print("  -> no usable article text found, posting single-image (hook slide only)")
+    if not slide_texts:
+        # No usable article text to build a description slide from - skip
+        # this story entirely rather than posting a hook-only single
+        # image. Both slides (hook + description) are mandatory for a
+        # story to go out; a hook slide without the description slide is
+        # never posted on its own, no matter how good the hook alone
+        # looks.
+        if verbose:
+            print("  -> no usable article text found, skipping this story (description slide required)")
+        return None
 
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_filename = base_filename or f"card_{timestamp}"
@@ -415,6 +427,17 @@ def _build_hindi_slides(result: dict, theme: dict, out_dir: str = CARD_DIR, tmp_
             print(f"  -> [hi] one extra info-slide translation failed for '{title[:50]}...' - "
                   f"Hindi carousel will have one fewer slide than English for this story")
 
+    if not slide_texts_hi:
+        # Both slides (hook + description) are mandatory - _build_post
+        # already guarantees the ENGLISH side always has a description
+        # slide, but the Hindi translation of that body text can still
+        # fail on its own (detail_hi came back empty) even though
+        # headline_hi succeeded. Don't post a hook-only Hindi card in
+        # that case - skip the Hindi post for this story entirely,
+        # same as the `if not headline_hi` check above.
+        print(f"  -> [hi] description slide translation failed for '{title[:50]}...' - skipping Hindi post for this story")
+        return None
+
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     base_filename_hi = f"card_hi_{timestamp}_{slugify(title)}"
 
@@ -483,7 +506,7 @@ def run(max_attempts: int = 30, apply_jitter: bool = True, dry_run: bool = False
 
         result = _build_post(article)
         if result is None:
-            continue  # no usable image for this story - try the next one
+            continue  # no usable image, or no description slide could be built - try the next one
         slide_paths, caption = result["slide_paths"], result["caption"]
 
         if dry_run:
@@ -585,7 +608,7 @@ def run_multiple(story_count: int = 10, max_attempts: int = 80, apply_jitter: bo
 
         result = _build_post(article)
         if result is None:
-            continue  # no usable image for this story - try the next one
+            continue  # no usable image, or no description slide could be built - try the next one
         slide_paths, caption = result["slide_paths"], result["caption"]
 
         if dry_run:
@@ -687,7 +710,7 @@ def run_batch(story_count: int = 10, max_attempts: int = 60, out_dir: str = None
         base_filename = f"trial_{len(results) + 1}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
         result = _build_post(article, out_dir=out_dir, base_filename=base_filename)
         if result is None:
-            continue  # no usable image for this story - try the next one
+            continue  # no usable image, or no description slide could be built - try the next one
         rank_note = f" | priority=#{result['priority_rank']}" if result.get("priority_rank") else ""
         print(f"  -> built {len(result['slide_paths'])} slide(s) | "
               f"image={'real' if result['used_real_image'] else 'generated'} | "
@@ -879,7 +902,7 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
 
         result = _build_post(article, theme=theme, build_full_caption=False)
         if result is None:
-            continue  # no usable image for this story - try the next one
+            continue  # no usable image, or no description slide could be built - try the next one
 
         # Cap this story's own slide count so the combined total stays
         # at/under story_count * images_per_story.
@@ -1203,7 +1226,7 @@ def run_hindi_test(max_attempts: int = 30, dry_run: bool = True) -> dict | None:
 
         result = _build_post(article, theme=theme)
         if result is None:
-            continue  # no usable image for this story - try the next one
+            continue  # no usable image, or no description slide could be built - try the next one
 
         print(f"  -> [hi-test] translating '{title[:60]}'...")
         hi = _build_hindi_slides(result, theme=theme)

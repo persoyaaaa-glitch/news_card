@@ -33,9 +33,10 @@ def resolve_article_url(google_news_link: str, timeout: int = 10) -> str:
     the hand-rolled selector would silently stop matching - and when it
     did, EVERYTHING downstream broke at once: no og:image (falls back to
     a generated background = the "ILLUSTRATIVE IMAGE" label), no article
-    paragraphs (falls back to a single-image post, no description slide),
-    and no article text to ground the caption AI call in (falls back to
-    a templated caption with no hashtags/song).
+    paragraphs (skips the story entirely - a description slide is
+    mandatory, there's no hook-only fallback), and no article text to
+    ground the caption AI call in (falls back to a templated caption
+    with no hashtags/song).
 
     So this now uses `googlenewsdecoder`, a small actively-maintained
     package dedicated to this one job, with two layers:

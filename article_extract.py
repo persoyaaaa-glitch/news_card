@@ -141,8 +141,11 @@ def get_carousel_slide_texts(article_url: str, num_slides: int = 3, min_paragrap
 
     Requires at least `min_paragraphs` real paragraphs before building
     slides - if extraction only turns up a paragraph or two of thin
-    content, it's better to fall back to a single-image post than build
-    an info-slide carousel on weak material.
+    content, it returns an empty list rather than building an info-slide
+    carousel on weak material. Callers (see hourly_run.py's _build_post)
+    treat an empty result as "skip this story" - both the hook and at
+    least one description slide are mandatory, so there's no hook-only
+    fallback anymore.
     """
     paragraphs = extract_article_paragraphs(article_url)
     if len(paragraphs) < min_paragraphs:

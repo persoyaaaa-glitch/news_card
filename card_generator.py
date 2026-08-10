@@ -128,24 +128,25 @@ def _photo_accent_color(img: Image.Image) -> str:
 
 
 # --- fonts -------------------------------------------------------------
-# All 4 font files that ship in fonts/ are now wired in:
-# Playfair Display (serif) is the default description/body font, and it's
-# also the default hook headline font now (matches the description slide).
+# All 5 font files that ship in fonts/ are now wired in:
+# Oblata Display (serif) is the default description/body font, and it's
+# also the default hook headline font (matches the description slide).
 # Tag pill / meta line stay on Runtime (clean sans, reads well small).
 _FONT_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "fonts")
 FONT_PLAYFAIR = _os.path.join(_FONT_DIR, "PlayfairDisplay-Bold.ttf")
 FONT_RUNTIME = _os.path.join(_FONT_DIR, "RuntimeRegular-m2Odx.otf")
 FONT_AVELINE = _os.path.join(_FONT_DIR, "AvelineEleganzaRegular-KVqeA.otf")
 FONT_NORWAY = _os.path.join(_FONT_DIR, "Norway-rvVR7.ttf")
+FONT_OBLATA = _os.path.join(_FONT_DIR, "OblataDisplayRegular-Zp8o8.otf")
 
 # Kept around for callers that want the old random-per-card behavior
 # (e.g. font_comparison.py), but it's no longer the default for new cards.
-FONT_HEADLINE_CHOICES = [FONT_PLAYFAIR, FONT_RUNTIME, FONT_AVELINE, FONT_NORWAY]
-FONT_HEADLINE = FONT_PLAYFAIR  # default hook headline font - same as the description body font
+FONT_HEADLINE_CHOICES = [FONT_PLAYFAIR, FONT_RUNTIME, FONT_AVELINE, FONT_NORWAY, FONT_OBLATA]
+FONT_HEADLINE = FONT_OBLATA  # default hook headline font - same as the description body font
 
 FONT_TAG = FONT_RUNTIME
 FONT_META = FONT_RUNTIME
-FONT_BODY = FONT_PLAYFAIR  # info-slide/description body text - MUST have working digit glyphs (real article text often has stats/dates)
+FONT_BODY = FONT_OBLATA  # info-slide/description body text - MUST have working digit glyphs (real article text often has stats/dates) - verified Oblata Display has full digit + upper/lowercase coverage
 
 
 # Fallback logo if a card is built without a theme (e.g. the self-test at
@@ -404,18 +405,37 @@ def _find_highlight_bounds(draw, wrapped: list, font, highlight: str):
     return None
 
 
+def _highlight_on_backdrop_line(bounds: dict, wrapped: list) -> bool:
+    """True if the highlighted phrase sits on the headline's TOP line
+    while that same line also carries the solid/translucent black
+    backdrop box from _draw_top_line_backdrop (drawn whenever the
+    headline wraps to 2+ lines - see that function). In that case the
+    highlighter box/ink is skipped entirely and the phrase just renders
+    in the headline's normal color - stacking the highlight marker on
+    top of the backdrop box reads as a muddy double-layer instead of a
+    clean highlighter mark, since the backdrop already darkens
+    everything on that line, highlighted or not."""
+    return bool(bounds) and len(wrapped) > 1 and bounds["line_index"] == 0
+
+
 def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, text_y: int,
                          pad_x: int, max_text_width: int, box_color: tuple, font_size: int,
-                         font: ImageFont.FreeTypeFont = None):
+                         font: ImageFont.FreeTypeFont = None, opacity: float = 0.6):
     """
     Paints a sharp-cornered "highlighter marker" box on the canvas at the
-    position described by `bounds` (from _find_highlight_bounds), filled
-    with `box_color` (solid, no transparency - meant to be the headline's
-    own gradient color, e.g. via _hex_to_rgb(theme["gradient"][0])). Must
-    be called BEFORE _draw_gradient_text, since that function pastes
-    gradient text using a per-glyph mask - anything already on the canvas
-    behind the glyphs (this box) stays visible in the gaps around/behind
-    the letters.
+    position described by `bounds` (from _find_highlight_bounds), tinted
+    with `box_color` (meant to be the headline's own gradient color, e.g.
+    via _hex_to_rgb(theme["gradient"][0])). Must be called BEFORE
+    _draw_gradient_text, since that function pastes gradient text using a
+    per-glyph mask - anything already on the canvas behind the glyphs
+    (this box) stays visible in the gaps around/behind the letters.
+
+    opacity: 0-1 alpha for the box (0.6 = 60% opaque, i.e. the photo/
+    headline panel underneath still shows through at 40% strength) - the
+    canvas is plain RGB (no alpha channel), so this is done by cropping
+    the box region and alpha-blending it against a solid box_color layer,
+    the same technique _draw_top_line_backdrop uses, rather than a flat
+    opaque fill - a real highlighter is translucent, not a solid block.
 
     Vertically sized off the highlighted slice's own ink bbox (hl_top/
     hl_bottom), not the line's full font-metric height - see
@@ -430,7 +450,12 @@ def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, tex
     # is left untouched outside the box, so that's the visible gap to
     # "on"/"for" etc. on each side.
     h_pad = 0
-    v_pad = max(8, round(font_size * 0.10))
+    # v_pad formula matches _draw_top_line_backdrop's exactly (max(3,
+    # round(font_size * 0.04))) so both boxes read as the same visual
+    # "thickness" around their text - they used to use different
+    # formulas (this one was max(8, round(font_size * 0.10))), which
+    # made the highlighter box noticeably chunkier than the backdrop box.
+    v_pad = max(3, round(font_size * 0.04))
     line_top = text_y + i * line_height
     box = [
         line_x + bounds["prefix_w"] - h_pad,
@@ -438,8 +463,16 @@ def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, tex
         line_x + bounds["prefix_w"] + bounds["hl_w"] + h_pad,
         line_top + bounds["hl_bottom"] + v_pad,
     ]
-    draw = ImageDraw.Draw(canvas)
-    draw.rectangle(box, fill=box_color)
+    box = [
+        int(max(0, box[0])), int(max(0, box[1])),
+        int(min(canvas.width, box[2])), int(min(canvas.height, box[3])),
+    ]
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return
+    region = canvas.crop(box)
+    color_layer = Image.new("RGB", region.size, box_color)
+    blended = Image.blend(region, color_layer, opacity)
+    canvas.paste(blended, box)
 
 
 def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: int, text_y: int,
@@ -461,18 +494,25 @@ def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: in
 
 
 def _draw_top_line_backdrop(canvas: Image.Image, wrapped: list, font: ImageFont.FreeTypeFont,
-                             line_height: int, text_y: int, pad_x: int, max_text_width: int):
+                             line_height: int, text_y: int, pad_x: int, max_text_width: int,
+                             opacity: float = 0.4):
     """
     When the headline wraps to 2+ lines, the topmost line sits higher in
     the photo panel where the bottom-fade (see build_news_card) hasn't
     darkened the photo much yet, so it can run low-contrast against a
-    busy/bright photo. This paints a solid black, sharp-cornered backdrop
-    box behind just that top line (sized to its own text width, not a
-    full-width bar) so it stays legible. Lower lines already sit on
-    darker, more-faded photo and don't get one. No-op for single-line
-    headlines. Must be called BEFORE the headline text itself is drawn,
-    so the text paints on top of this box (mirrors _draw_highlight_box's
-    draw-order requirement).
+    busy/bright photo. This paints a black, sharp-cornered backdrop box
+    behind just that top line (sized to its own text width, not a full-
+    width bar) so it stays legible. Lower lines already sit on darker,
+    more-faded photo and don't get one. No-op for single-line headlines.
+    Must be called BEFORE the headline text itself is drawn, so the text
+    paints on top of this box (mirrors _draw_highlight_box's draw-order
+    requirement).
+
+    opacity: 0-1 alpha for the black box (0.4 = 40% opaque, i.e. the
+    photo underneath still shows through at 60% strength) - the canvas
+    is plain RGB (no alpha channel), so this is done by cropping the
+    box region and alpha-blending it against a solid black layer rather
+    than a simple flat-fill rectangle.
     """
     if len(wrapped) < 2:
         return
@@ -489,7 +529,18 @@ def _draw_top_line_backdrop(canvas: Image.Image, wrapped: list, font: ImageFont.
         line_x + line_w + h_pad,
         text_y + ink_bottom + v_pad,
     ]
-    draw.rectangle(box, fill=(0, 0, 0))
+    # Clamp to canvas bounds before cropping - textbbox/padding can in
+    # principle push a coordinate slightly outside the image.
+    box = [
+        int(max(0, box[0])), int(max(0, box[1])),
+        int(min(canvas.width, box[2])), int(min(canvas.height, box[3])),
+    ]
+    if box[2] <= box[0] or box[3] <= box[1]:
+        return
+    region = canvas.crop(box)
+    black_layer = Image.new("RGB", region.size, (0, 0, 0))
+    blended = Image.blend(region, black_layer, opacity)
+    canvas.paste(blended, box)
 
 
 def _draw_gradient_text(canvas: Image.Image, xy, lines, font, line_height, hex_stops, block_width=None, center=False):
@@ -563,15 +614,26 @@ def _draw_logo(canvas: Image.Image, pad_x: int, bottom_y: int, logo_size: int = 
     canvas.paste(logo, logo_pos, mask)
 
 
-def _draw_breaking_badge(draw: ImageDraw.ImageDraw, x: int, y: int, font: ImageFont.FreeTypeFont) -> list:
-    """Draws a fixed red/white 'BREAKING' pill with its top-left corner at
-    (x, y). Returns the pill's bounding box [x0, y0, x1, y1] so the caller
-    can position the next element (e.g. the category tag) after it."""
+def _draw_breaking_badge(draw: ImageDraw.ImageDraw, x: int, y: int, font: ImageFont.FreeTypeFont,
+                          align: str = "left") -> list:
+    """Draws a fixed red/white 'BREAKING' pill at (x, y).
+
+    align="left" (default): (x, y) is the pill's top-left corner.
+    align="right": x is instead the pill's desired RIGHT edge (e.g.
+    CANVAS_W - pad_x) - the pill is drawn ending at x, growing leftward,
+    so it sits flush against the right side of the card independent of
+    its own text width. Used to put BREAKING in the top-right corner,
+    opposite the category tag pill in the top-left (see build_news_card).
+
+    Returns the pill's bounding box [x0, y0, x1, y1]."""
     text = "BREAKING"
     bbox = draw.textbbox((0, 0), text, font=font)
     w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
     pad = 16
-    box = [x, y, x + w + pad * 2, y + h + pad * 2]
+    box_w = w + pad * 2
+    box_h = h + pad * 2
+    x0 = (x - box_w) if align == "right" else x
+    box = [x0, y, x0 + box_w, y + box_h]
     draw.rounded_rectangle(box, radius=8, fill=BREAKING_BG)
     draw.text((box[0] + pad, box[1] + pad - 4), text, font=font, fill=BREAKING_TEXT)
     return box
@@ -677,17 +739,16 @@ def build_news_card(
         )
 
     # --- BREAKING badge, only for stories flagged as breaking news - sits
-    # to the left of the category pill, same row, fixed red/white so it
-    # never blends into the day's theme color ---
-    tag_start_x = pad_x
+    # in the top-RIGHT corner, opposite the category pill (top-left), so
+    # the two never compete for the same space or overlap ---
     if breaking:
         breaking_font = _load_font(FONT_TAG, 30, variation="Bold")
-        breaking_box = _draw_breaking_badge(draw, pad_x, pad_y, breaking_font)
-        tag_start_x = breaking_box[2] + 12  # small gap before the category pill
+        _draw_breaking_badge(draw, CANVAS_W - pad_x, pad_y, breaking_font, align="right")
 
-    # --- tag pill (e.g. "NEWS", "BREAKING", "TECH") - solid color pulled
-    # from this batch's theme, so it matches the headline/logo instead of
-    # being a fixed unrelated color ---
+    # --- tag pill (e.g. "NEWS", "TECH") - solid color pulled from this
+    # batch's theme, so it matches the headline/logo instead of being a
+    # fixed unrelated color. Always top-left, independent of BREAKING. ---
+    tag_start_x = pad_x
     pill_bg, pill_text = ((235, 235, 235), (0, 0, 0)) if grayscale else _pill_colors_from_theme(theme)
     tag_font = _load_font(FONT_TAG, 30, variation="Bold")
     tag_bbox = draw.textbbox((0, 0), tag.upper(), font=tag_font)
@@ -796,6 +857,11 @@ def build_news_card(
     # reads as solid black text on its own-color box, not blended into the
     # gradient headline color).
     highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
+    # Never draw the highlighter box/ink over the top-line black backdrop
+    # (see _highlight_on_backdrop_line) - only text that's sitting
+    # directly on the photo gets the highlighter treatment.
+    if _highlight_on_backdrop_line(highlight_bounds, wrapped):
+        highlight_bounds = None
 
     _draw_top_line_backdrop(canvas, wrapped, headline_font, line_height, text_y, pad_x, max_text_width)
 
@@ -911,14 +977,14 @@ def build_info_slide(
         )
 
     # --- BREAKING badge, same rule as the hook slide: only for stories
-    # flagged as breaking, sits left of the category pill ---
-    tag_start_x = pad_x
+    # flagged as breaking, sits in the top-RIGHT corner, opposite the
+    # category pill (top-left) ---
     if breaking:
         breaking_font = _load_font(FONT_TAG, 26, variation="Bold")
-        breaking_box = _draw_breaking_badge(draw, pad_x, pad_y, breaking_font)
-        tag_start_x = breaking_box[2] + 12
+        _draw_breaking_badge(draw, CANVAS_W - pad_x, pad_y, breaking_font, align="right")
 
     # --- tag pill, same theme-matched color as the hook slide, for visual continuity ---
+    tag_start_x = pad_x
     pill_bg, pill_text = _pill_colors_from_theme(theme)
     tag_font = _load_font(FONT_TAG, 26, variation="Bold")
     tag_bbox = draw.textbbox((0, 0), tag.upper(), font=tag_font)
