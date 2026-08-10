@@ -476,21 +476,28 @@ def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, tex
 
 
 def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: int, text_y: int,
-                         pad_x: int, max_text_width: int):
+                         pad_x: int, max_text_width: int, gradient_stops: list):
     """
-    Redraws just the highlighted phrase in solid black, on top of the
-    (already-drawn) gradient headline text - the box behind it uses the
-    headline's own color, so the phrase itself needs to contrast against
-    that, not blend into it. Must be called AFTER _draw_gradient_text so
-    this ink isn't itself overpainted.
+    Redraws just the highlighted phrase on top of the (already-drawn)
+    gradient headline text, using the SAME hex_stops as the rest of the
+    headline (whatever this carousel's color_mode resolved to - gradient,
+    flat white, flat solid, or the photo-sampled accent) rather than a
+    fixed black. _make_linear_gradient's gradient is purely vertical (each
+    row is one flat color, stretched across the full width - see its
+    docstring), so building a fresh one sized to just this slice produces
+    the exact same per-row color the full-line gradient would have shown
+    through the same y-range; no need to crop from the full line's
+    gradient. Must be called AFTER _draw_gradient_text so this ink isn't
+    itself overpainted.
     """
     i = bounds["line_index"]
     line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
-    draw = ImageDraw.Draw(canvas)
-    draw.text(
-        (line_x + bounds["prefix_w"], text_y + i * line_height),
-        bounds["exact_slice"], font=font, fill=(0, 0, 0),
-    )
+    slice_w = int(round(bounds["hl_w"]))
+    gradient_slice = _make_linear_gradient(slice_w + 4, line_height + 4, gradient_stops)
+    mask = Image.new("L", (slice_w + 4, line_height + 4), 0)
+    ImageDraw.Draw(mask).text((0, 0), bounds["exact_slice"], font=font, fill=255)
+    paste_xy = (int(round(line_x + bounds["prefix_w"])), int(round(text_y + i * line_height)))
+    canvas.paste(gradient_slice, paste_xy, mask)
 
 
 def _draw_top_line_backdrop(canvas: Image.Image, wrapped: list, font: ImageFont.FreeTypeFont,
@@ -846,16 +853,15 @@ def build_news_card(
     else:
         gradient_stops = theme["gradient"]
 
-    # Highlighter-marker box + solid-black ink overlay behind/over the
-    # AI-picked phrase, if any. Skipped for grayscale/sensitive cards - see
+    # Highlighter-marker box + ink overlay behind/over the AI-picked
+    # phrase, if any. Skipped for grayscale/sensitive cards - see
     # docstring. The box uses the headline's own color (theme["gradient"][0],
     # its dominant/anchor stop - repeats at the start/middle/end of every
     # theme's gradient, see HEADLINE_THEMES) rather than a fixed color, so
     # it always matches that card's headline. It's drawn before the
     # gradient text (so it shows through the gaps around the glyphs); the
-    # black ink overlay is redrawn after (so the highlighted phrase itself
-    # reads as solid black text on its own-color box, not blended into the
-    # gradient headline color).
+    # ink overlay is redrawn after, in the same color/gradient as the rest
+    # of the headline (see _draw_highlight_ink) rather than a fixed black.
     highlight_bounds = _find_highlight_bounds(draw, wrapped, headline_font, highlight) if highlight and not grayscale else None
     # Never draw the highlighter box/ink over the top-line black backdrop
     # (see _highlight_on_backdrop_line) - only text that's sitting
@@ -873,7 +879,12 @@ def build_news_card(
                          block_width=max_text_width, center=True)
 
     if highlight_bounds:
-        _draw_highlight_ink(canvas, highlight_bounds, headline_font, line_height, text_y, pad_x, max_text_width)
+        # The gold theme (bronze_gold) keeps solid-black highlight ink on
+        # purpose - black reads best against its own warm gold box.
+        # Every other theme uses the headline's own color/gradient (see
+        # _draw_highlight_ink) so the phrase doesn't stand out in black.
+        highlight_ink_stops = ["#000000"] * 5 if theme.get("name") == "bronze_gold" else gradient_stops
+        _draw_highlight_ink(canvas, highlight_bounds, headline_font, line_height, text_y, pad_x, max_text_width, highlight_ink_stops)
 
     # --- source / meta line above the black footer, and the brand logo ---
     # The logo is now vertically centered inside the slim black footer

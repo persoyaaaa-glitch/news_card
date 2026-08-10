@@ -596,19 +596,23 @@ def _draw_highlight_box(canvas: Image.Image, bounds: dict, line_height: int, tex
 
 
 def _draw_highlight_ink(canvas: Image.Image, bounds: dict, font, line_height: int, text_y: int,
-                         pad_x: int, max_text_width: int):
+                         pad_x: int, max_text_width: int, gradient_stops: list):
     """
-    Redraws the highlighted phrase in solid black over the gradient text,
-    so it contrasts against the box (which uses the headline's own color).
-    Must run AFTER _draw_gradient_text.
+    Redraws the highlighted phrase over the gradient text using the SAME
+    hex_stops as the rest of the headline (not a fixed black) - see the
+    English card_generator._draw_highlight_ink for why a fresh gradient
+    sized to just this slice is equivalent to cropping from the full
+    line's gradient (it's purely vertical/per-row). Must run AFTER
+    _draw_gradient_text.
     """
     i = bounds["line_index"]
     line_x = pad_x + (max_text_width - bounds["line_w"]) // 2
-    draw = ImageDraw.Draw(canvas)
-    draw.text(
-        (line_x + bounds["prefix_w"], text_y + i * line_height),
-        bounds["exact_slice"], font=font, fill=(0, 0, 0),
-    )
+    slice_w = int(round(bounds["hl_w"]))
+    gradient_slice = _make_linear_gradient(slice_w + 4, line_height + 4, gradient_stops)
+    mask = Image.new("L", (slice_w + 4, line_height + 4), 0)
+    ImageDraw.Draw(mask).text((0, 0), bounds["exact_slice"], font=font, fill=255)
+    paste_xy = (int(round(line_x + bounds["prefix_w"])), int(round(text_y + i * line_height)))
+    canvas.paste(gradient_slice, paste_xy, mask)
 
 
 def _draw_top_line_backdrop(canvas: Image.Image, wrapped: list, font: ImageFont.FreeTypeFont,
@@ -1056,7 +1060,11 @@ def build_news_card(
                          block_width=max_text_width, center=True)
 
     if highlight_bounds:
-        _draw_highlight_ink(canvas, highlight_bounds, headline_font, line_height, text_y, pad_x, max_text_width)
+        # Mirrors card_generator.py: bronze_gold keeps solid-black
+        # highlight ink on purpose, every other theme matches its own
+        # headline color/gradient instead of black.
+        highlight_ink_stops = ["#000000"] * 5 if theme.get("name") == "bronze_gold" else gradient_stops
+        _draw_highlight_ink(canvas, highlight_bounds, headline_font, line_height, text_y, pad_x, max_text_width, highlight_ink_stops)
 
     # --- source / meta line above the black footer, and the brand logo ---
     # The logo is now vertically centered inside the slim black footer
