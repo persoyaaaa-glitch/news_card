@@ -37,7 +37,17 @@ Safe to re-run: any slot that already has content from an earlier
 attempt is skipped, so a failed/interrupted run just gets picked back
 up on the next 30-min tick without rebuilding or double-reserving
 stories.
+
+Can also be pointed at ONE specific slot with `--slot INDEX`, ignoring
+BUILD_WINDOW_MINUTES entirely - this is what the PWA's "Generate now"
+button (generate-slot.yml, dispatched via the generate-slot Supabase
+Edge Function) uses so a reviewer doesn't have to wait for a slot to
+enter the rolling 30-min-ahead window before its content shows up.
+This only builds content; it never posts anything and never touches
+planned_time, so the slot still only goes out at its normal fixed time
+via daily_scheduler.py --check-once, same as every other slot.
 """
+import argparse
 import traceback
 from datetime import datetime
 
@@ -119,6 +129,57 @@ def _slot_from_candidates(candidates: list, selected_ids: list) -> dict:
     }
 
 
+def _build_one_slot(index: int, iso_time: str, total_slots: int, slots_state: dict) -> bool:
+    """
+    Builds CANDIDATE_STORY_COUNT candidates for ONE slot and saves the
+    result into slots_state in place. Shared by the rolling windowed
+    pass (pregenerate_today) and the manual single-slot trigger
+    (force_build_slot) so both build/save exactly the same shape.
+    Returns True if the slot ended up with content, False if the build
+    failed or found no usable stories - either way the slot is left
+    unbuilt so it gets retried on a later tick or built fresh at post
+    time, never left half-written.
+    """
+    print(f"\n[slot {index + 1}/{total_slots}] planned {iso_time} - building "
+          f"{CANDIDATE_STORY_COUNT} candidates...")
+    try:
+        result = hourly_run.build_candidates(
+            candidate_count=CANDIDATE_STORY_COUNT,
+            images_per_story=IMAGES_PER_STORY,
+        )
+    except Exception:
+        print(f"[slot {index + 1}] build failed - leaving unbuilt, "
+              f"will build fresh when this slot's time comes.")
+        traceback.print_exc()
+        return False
+
+    candidates = result["candidates"]
+    if not candidates:
+        print(f"[slot {index + 1}] no usable stories found this attempt - leaving "
+              f"unbuilt, will build fresh at post time instead.")
+        return False
+
+    selected_ids = [c["id"] for c in candidates[:STORIES_PER_POST]]
+    computed = _slot_from_candidates(candidates, selected_ids)
+
+    built_slot = {
+        "index": index,
+        "planned_time": iso_time,
+        "candidates": candidates,
+        "selected_story_ids": selected_ids,
+        **computed,
+    }
+    # Replace the empty skeleton entry for this index (written at midnight
+    # by _publish_schedule_skeleton) in place, rather than appending a
+    # second row for the same slot.
+    slots_state["slots"] = [s for s in slots_state["slots"] if s.get("index") != index]
+    slots_state["slots"].append(built_slot)
+    _save_slots_state(slots_state)  # save right away - a mid-run interruption loses nothing
+    print(f"[slot {index + 1}] built: {len(candidates)} candidates, "
+          f"{len(selected_ids)} selected by default, {len(computed['image_urls'])} images.")
+    return True
+
+
 def pregenerate_today():
     schedule_state = _ensure_today_schedule_remote(_load_state_remote())
     planned_times = schedule_state["planned_times"]
@@ -143,50 +204,55 @@ def pregenerate_today():
     failed = 0
 
     for index, iso_time in due_for_build:
-        print(f"\n[slot {index + 1}/{len(planned_times)}] planned {iso_time} - building "
-              f"{CANDIDATE_STORY_COUNT} candidates...")
-        try:
-            result = hourly_run.build_candidates(
-                candidate_count=CANDIDATE_STORY_COUNT,
-                images_per_story=IMAGES_PER_STORY,
-            )
-        except Exception:
-            print(f"[slot {index + 1}] build failed - leaving unbuilt, "
-                  f"daily_scheduler.py will build it fresh when this slot's time comes.")
-            traceback.print_exc()
+        if _build_one_slot(index, iso_time, len(planned_times), slots_state):
+            built += 1
+        else:
             failed += 1
-            continue
-
-        candidates = result["candidates"]
-        if not candidates:
-            print(f"[slot {index + 1}] no usable stories found this attempt - leaving "
-                  f"unbuilt, will build fresh at post time instead.")
-            failed += 1
-            continue
-
-        selected_ids = [c["id"] for c in candidates[:STORIES_PER_POST]]
-        computed = _slot_from_candidates(candidates, selected_ids)
-
-        built_slot = {
-            "index": index,
-            "planned_time": iso_time,
-            "candidates": candidates,
-            "selected_story_ids": selected_ids,
-            **computed,
-        }
-        # Replace the empty skeleton entry for this index (written at midnight
-        # by _publish_schedule_skeleton) in place, rather than appending a
-        # second row for the same slot.
-        slots_state["slots"] = [s for s in slots_state["slots"] if s.get("index") != index]
-        slots_state["slots"].append(built_slot)
-        _save_slots_state(slots_state)  # save after each slot - a mid-run interruption loses nothing
-        built += 1
-        print(f"[slot {index + 1}] built: {len(candidates)} candidates, "
-              f"{len(selected_ids)} selected by default, {len(computed['image_urls'])} images.")
 
     print(f"\n[{now_ist().isoformat()}] Content build pass done: {built} built, "
           f"{failed} failed (will retry on a later tick or build fresh at post time).")
 
 
+def force_build_slot(index: int) -> bool:
+    """
+    Manual "Generate now" trigger from the PWA - builds ONE specific
+    slot's content immediately, ignoring BUILD_WINDOW_MINUTES, instead
+    of waiting for it to roll into the normal 30-min-ahead window.
+    Never posts anything and never touches planned_time: the slot still
+    only actually goes out via the normal daily_scheduler.py
+    --check-once run once its fixed time arrives, exactly like every
+    other slot.
+    """
+    schedule_state = _ensure_today_schedule_remote(_load_state_remote())
+    planned_times = schedule_state["planned_times"]
+
+    if index < 0 or index >= len(planned_times):
+        print(f"Slot index {index} is out of range - today has {len(planned_times)} slot(s).")
+        return False
+
+    slots_state = _load_slots_state()
+    if _already_built(slots_state, index):
+        print(f"Slot {index} already has content built - nothing to do.")
+        return True
+
+    ok = _build_one_slot(index, planned_times[index], len(planned_times), slots_state)
+    if not ok:
+        print(f"Slot {index} couldn't be built on this attempt - it'll retry automatically "
+              f"on the next scheduler tick, and again at post time if it's still unbuilt then.")
+    return ok
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--slot", type=int, default=None,
+        help="Force-build ONE slot by its 0-based index right now, ignoring the "
+             "normal 30-min build window (used by the PWA's 'Generate now' button).",
+    )
+    args = parser.parse_args()
+
+    if args.slot is not None:
+        ok = force_build_slot(args.slot)
+        raise SystemExit(0 if ok else 1)
+
     pregenerate_today()

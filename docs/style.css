@@ -166,6 +166,21 @@ body{
 .review-btn:disabled{opacity:.5;border-color:var(--line);color:var(--text-dim);cursor:default;}
 .review-btn[hidden]{display:none;}
 
+/* "Generate now" (build a not-yet-built slot's content on demand) */
+.generate-block[hidden]{display:none;}
+.generate-btn{
+  width:100%;padding:13px;border-radius:10px;border:none;
+  background:var(--amber);color:#1a1200;font-family:'Archivo',sans-serif;
+  font-weight:700;font-size:14px;cursor:pointer;
+}
+.generate-btn:disabled{opacity:.6;cursor:default;}
+.slot-generate-btn{
+  font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.05em;
+  color:#1a1200;background:var(--amber);border:none;border-radius:6px;
+  padding:5px 9px;cursor:pointer;flex-shrink:0;white-space:nowrap;
+}
+.slot-generate-btn:disabled{opacity:.6;cursor:default;background:var(--panel-2);color:var(--text-dim);}
+
 /* Review modal (pick/reorder which candidate stories post) */
 .review-list{display:flex;flex-direction:column;gap:8px;}
 .review-row{

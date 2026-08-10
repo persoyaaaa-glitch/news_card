@@ -1,0 +1,52 @@
+name: Generate content for one slot (manual)
+
+# Fired by the PWA's "Generate now" button on a slot that hasn't had
+# its content built yet - via the generate-slot Supabase Edge Function,
+# the same dispatch pattern trigger-schedule-check already uses for the
+# schedule editor. This ONLY builds that slot's candidates/images/
+# caption early; it never posts anything and never changes the slot's
+# planned_time. The slot still gets published by the normal
+# scheduler.yml cron once its fixed time actually arrives.
+on:
+  workflow_dispatch:
+    inputs:
+      slot_index:
+        description: "0-based index of today's slot to build content for"
+        required: true
+
+# Same concurrency group as scheduler.yml (not a different one) on
+# purpose: both workflows read-modify-write the same daily_slots row in
+# Supabase, so they must never run at the same time - this queues a
+# manual generate behind an in-flight scheduler tick (and vice versa)
+# instead of racing and one clobbering the other's write.
+concurrency:
+  group: news-carousel-scheduler
+  cancel-in-progress: false
+
+jobs:
+  generate-slot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build content for the requested slot now
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID_HI: ${{ secrets.IG_USER_ID_HI }}
+          IG_ACCESS_TOKEN_HI: ${{ secrets.IG_ACCESS_TOKEN_HI }}
+          POST_HINDI_PAGE: ${{ secrets.POST_HINDI_PAGE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python content_pregen.py --slot "${{ inputs.slot_index }}"

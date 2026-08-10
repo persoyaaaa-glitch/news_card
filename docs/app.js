@@ -140,6 +140,31 @@ async function saveScheduleOverride(dateStr, targetCount, timeEdits) {
   return resp.ok;
 }
 
+// Fires the generate-slot Edge Function, which dispatches
+// generate-slot.yml on GitHub to force-build ONE slot's content right
+// now instead of waiting for the rolling 30-min-ahead build. Only
+// builds content - the slot still posts at its normal fixed time.
+async function triggerGenerateSlot(dateStr, slotIndex) {
+  try {
+    const resp = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/generate-slot`, {
+      method: "POST",
+      headers: {
+        apikey: CONFIG.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex }),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.ok) {
+      return { ok: false, error: (data && data.error) || `couldn't start (${resp.status})` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "check your connection" };
+  }
+}
+
 async function saveSubscription(sub) {
   const json = sub.toJSON();
   const url = `${CONFIG.SUPABASE_URL}/rest/v1/push_subscriptions`;
@@ -298,6 +323,11 @@ let currentSlots = [];
 let currentManualIndices = new Set();
 let currentDateStr = null;
 
+// slot.index values with a "Generate now" build currently in flight (this
+// browser tab only - just drives the "Generating..." UI state, the real
+// source of truth is whether the slot has content in Supabase).
+const generatingSlotIndices = new Set();
+
 // Status now reflects the REAL posted/posted_hi flag from the backend
 // (daily_scheduler.py writes this the moment a post is CONFIRMED to
 // have gone out - see _mark_slot_posted_in_skeleton), not just whether
@@ -375,8 +405,106 @@ function render(data, manualIndices) {
       <span class="slot-meta">${(slot.stories || []).length}&middot;${(lang === "hi" ? (slot.image_urls_hi || []) : (slot.image_urls || [])).length}${otherLangHasContent ? ` <span class="hi-badge">${otherLangBadge}</span>` : ""}</span>
     `;
     row.addEventListener("click", () => openModal(slot));
+
+    // No content built for this slot yet (and it hasn't already posted) -
+    // offer to build it now instead of waiting for the rolling 30-min
+    // pre-build window to reach it. Tapping this never opens the modal.
+    if (!topStory && status !== "past") {
+      const isGenerating = generatingSlotIndices.has(slot.index);
+      const genBtn = document.createElement("button");
+      genBtn.type = "button";
+      genBtn.className = "slot-generate-btn";
+      genBtn.textContent = isGenerating ? "Generating..." : "Generate";
+      genBtn.disabled = isGenerating;
+      genBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        generateSlotNow(slot);
+      });
+      row.appendChild(genBtn);
+    }
+
     list.appendChild(row);
   });
+}
+
+// ---- Generate now (force-build a not-yet-built slot's content) ----
+
+// Shows/hides the modal's "Generate content now" block for whichever
+// slot the modal currently has open, and (re)wires its click handler.
+function updateGenerateBlock(slot) {
+  const block = document.getElementById("generateBlock");
+  const btn = document.getElementById("generateBtn");
+  const status = document.getElementById("generateStatus");
+  const hasContent = (slot.stories || []).length > 0;
+  const isPast = slotStatus(slot) === "past";
+
+  if (hasContent || isPast) {
+    block.hidden = true;
+    return;
+  }
+  block.hidden = false;
+  const isGenerating = generatingSlotIndices.has(slot.index);
+  btn.disabled = isGenerating;
+  btn.textContent = isGenerating ? "Generating..." : "Generate content now";
+  if (!isGenerating) status.textContent = "";
+  btn.onclick = () => generateSlotNow(slot, status);
+}
+
+// Kicks off a manual build for one slot, then polls every 15s (up to
+// ~5 min) until the slot actually has content, refreshing the list and
+// (if still open) the modal as soon as it lands. This only builds
+// content - it never posts; the slot still fires at its normal fixed
+// time via the regular scheduler.
+async function generateSlotNow(slot, statusEl) {
+  if (!currentDateStr || generatingSlotIndices.has(slot.index)) return;
+
+  generatingSlotIndices.add(slot.index);
+  if (statusEl) statusEl.textContent = "Starting...";
+  render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+  if (currentModalSlot && currentModalSlot.index === slot.index) updateGenerateBlock(currentModalSlot);
+
+  const result = await triggerGenerateSlot(currentDateStr, slot.index);
+  if (!result.ok) {
+    generatingSlotIndices.delete(slot.index);
+    if (statusEl) statusEl.textContent = `Couldn't start: ${result.error}`;
+    render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+    if (currentModalSlot && currentModalSlot.index === slot.index) updateGenerateBlock(currentModalSlot);
+    return;
+  }
+
+  if (statusEl) statusEl.textContent = "Generating - takes a minute or two, checking automatically...";
+  pollForSlotContent(slot.index);
+}
+
+function pollForSlotContent(slotIndex, attemptsLeft = 20) {
+  if (!generatingSlotIndices.has(slotIndex)) return; // cancelled/superseded elsewhere
+  if (attemptsLeft <= 0) {
+    generatingSlotIndices.delete(slotIndex);
+    render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+    if (currentModalSlot && currentModalSlot.index === slotIndex) {
+      updateGenerateBlock(currentModalSlot);
+      document.getElementById("generateStatus").textContent =
+        "Still building - this is taking longer than usual. It'll appear here once it's ready.";
+    }
+    return;
+  }
+  setTimeout(async () => {
+    await refresh(); // re-fetches and calls render() itself
+    const slot = currentSlots.find((s) => s.index === slotIndex);
+    const built = slot && (slot.stories || []).length > 0;
+    if (built) {
+      generatingSlotIndices.delete(slotIndex);
+      render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+      if (currentModalSlot && currentModalSlot.index === slotIndex) {
+        Object.assign(currentModalSlot, slot);
+        renderModalLang(currentModalLang);
+        populateStoryList(currentModalSlot);
+        updateGenerateBlock(currentModalSlot);
+      }
+      return;
+    }
+    pollForSlotContent(slotIndex, attemptsLeft - 1);
+  }, 15000);
 }
 
 function updateProgress(done, total) {
@@ -414,6 +542,7 @@ function openModal(slot) {
 
   renderModalLang(currentModalLang);
   populateStoryList(slot);
+  updateGenerateBlock(slot);
 
   const reviewBtn = document.getElementById("reviewBtn");
   const hasCandidates = (slot.candidates || []).length > 0;
