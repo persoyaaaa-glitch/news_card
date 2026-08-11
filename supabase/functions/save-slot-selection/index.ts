@@ -47,51 +47,99 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-// Assembles intro + numbered story blocks + hashtags, trimming from the
-// END (lowest-priority story) if it would exceed IG_CAPTION_CHAR_LIMIT -
-// mirrors hourly_run._fit_caption exactly, so the same slot's caption
-// comes out the same whether it was built by content_pregen.py or
-// re-saved here after a reorder.
-function fitCaption(intro: string, blocks: string[], hashtagLine: string): string {
-  let remaining = blocks.slice();
-  while (remaining.length > 0) {
-    const lines = [intro, ""];
-    remaining.forEach((block, i) => {
-      lines.push(`${i + 1}. ${block}`);
-      lines.push("");
-    });
-    const caption = lines.join("\n").replace(/\n+$/, "") + "\n\n" + hashtagLine;
-    if (caption.length <= IG_CAPTION_CHAR_LIMIT) return caption;
-    if (remaining.length === 1) {
-      const overflow = caption.length - IG_CAPTION_CHAR_LIMIT;
-      const keep = Math.max(0, remaining[0].length - overflow - 1);
-      const trimmed = remaining[0].slice(0, keep).trimEnd() + "…";
-      return [intro, "", `1. ${trimmed}`].join("\n") + "\n\n" + hashtagLine;
+// Assembles intro + numbered story blocks + hashtags. If it would
+// exceed IG_CAPTION_CHAR_LIMIT, TRIMS each story's paragraph down to a
+// fair share of the remaining space rather than dropping whole stories
+// - every story selected always keeps its headline and at least a
+// shortened write-up in the caption. Bodies already shorter than their
+// fair share keep their full text; the space they don't use is handed
+// to the longer bodies (processed shortest-first). Only if bare
+// titles/sources alone don't fit do we fall back to dropping the
+// lowest-priority story entirely. Mirrors hourly_run._fit_caption
+// exactly, so the same slot's caption comes out the same whether it
+// was built by content_pregen.py or re-saved here after a reorder.
+type CaptionPart = { title: string; body: string; source: string };
+
+function buildCaption(intro: string, parts: CaptionPart[], hashtagLine: string): string {
+  const lines = [intro, ""];
+  parts.forEach((p, i) => {
+    const block = (p.body ? `${p.title} — ${p.body}` : p.title) + ` (Source: ${p.source})`;
+    lines.push(`${i + 1}. ${block}`);
+    lines.push("");
+  });
+  return lines.join("\n").replace(/\n+$/, "") + "\n\n" + hashtagLine;
+}
+
+function fitCaption(intro: string, parts: CaptionPart[], hashtagLine: string): string {
+  const full = buildCaption(intro, parts, hashtagLine);
+  if (full.length <= IG_CAPTION_CHAR_LIMIT) return full;
+
+  // Every story is assumed to end up with a non-empty (if shortened)
+  // body, which costs an extra " — " separator each vs. the bare title
+  // - reserve that too, or the final caption can come out a few
+  // characters over the limit.
+  const separator = " — ";
+  const bareParts = parts.map((p) => ({ ...p, body: "" }));
+  const overhead = buildCaption(intro, bareParts, hashtagLine).length;
+  const n = parts.length;
+  const available = IG_CAPTION_CHAR_LIMIT - overhead - n * separator.length;
+
+  if (available <= 0 || n === 0) {
+    // Bare titles alone don't fit - fall back to dropping stories from
+    // the end (old behavior) as a last resort.
+    let remaining = parts.slice();
+    while (remaining.length > 0) {
+      const trial = buildCaption(intro, remaining, hashtagLine);
+      if (trial.length <= IG_CAPTION_CHAR_LIMIT) return trial;
+      if (remaining.length === 1) break;
+      remaining = remaining.slice(0, -1);
     }
-    remaining = remaining.slice(0, -1); // drop the lowest-priority story and retry
+    return (intro + "\n\n" + hashtagLine).slice(0, IG_CAPTION_CHAR_LIMIT);
   }
-  return (intro + "\n\n" + hashtagLine).slice(0, IG_CAPTION_CHAR_LIMIT);
+
+  // Distribute `available` characters of body text across all n
+  // stories, shortest-body-first, so short paragraphs keep their full
+  // text and unused space passes on to the longer ones.
+  const order = parts.map((_, i) => i).sort((a, b) => parts[a].body.length - parts[b].body.length);
+  const trimmedBodies: string[] = new Array(n);
+  let remainingBudget = available;
+  let remainingN = n;
+  for (const idx of order) {
+    const body = parts[idx].body;
+    const share = remainingN > 0 ? Math.floor(remainingBudget / remainingN) : 0;
+    if (body.length <= share) {
+      trimmedBodies[idx] = body;
+      remainingBudget -= body.length;
+    } else {
+      const keep = Math.max(0, share - 1); // leave room for the "…"
+      trimmedBodies[idx] = keep > 0 ? body.slice(0, keep).trimEnd() + "…" : "";
+      remainingBudget -= share;
+    }
+    remainingN -= 1;
+  }
+
+  const trimmedParts = parts.map((p, i) => ({ ...p, body: trimmedBodies[i] }));
+  return buildCaption(intro, trimmedParts, hashtagLine);
 }
 
 function templatedCaption(selected: any[]): string {
   const intro = `Today's top ${selected.length} stories - here's what's happening:`;
-  const blocks = selected.map((c) => {
-    const body = c.caption_paragraph || c.detail_text || "";
-    const headlinePart = body ? `${c.title} — ${body}` : c.title;
-    return `${headlinePart} (Source: ${c.source})`;
-  });
-  return fitCaption(intro, blocks, HASHTAGS_EN);
+  const parts: CaptionPart[] = selected.map((c) => ({
+    title: c.title,
+    body: c.caption_paragraph || c.detail_text || "",
+    source: c.source,
+  }));
+  return fitCaption(intro, parts, HASHTAGS_EN);
 }
 
 function templatedCaptionHindi(selected: any[]): string {
   const intro = `आज की ${selected.length} बड़ी खबरें:`;
-  const blocks = selected.map((c) => {
-    const headline = c.title_hi || c.title;
-    const body = c.caption_paragraph_hi || "";
-    const headlinePart = body ? `${headline} — ${body}` : headline;
-    return `${headlinePart} (Source: ${c.source})`;
-  });
-  return fitCaption(intro, blocks, HASHTAGS_HI);
+  const parts: CaptionPart[] = selected.map((c) => ({
+    title: c.title_hi || c.title,
+    body: c.caption_paragraph_hi || "",
+    source: c.source,
+  }));
+  return fitCaption(intro, parts, HASHTAGS_HI);
 }
 
 Deno.serve(async (req) => {
