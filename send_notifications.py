@@ -17,7 +17,7 @@ import os
 from pywebpush import webpush, WebPushException
 
 from daily_scheduler import (
-    SLOTS_KEY, STATE_KEY, IST, now_ist, today_ist,
+    slots_key, STATE_KEY, IST, now_ist, today_ist,
     _ensure_today_schedule_remote, _load_state_remote, _save_state_remote,
 )
 from supabase_client import get_client, get_state
@@ -88,7 +88,7 @@ def _send_to_all(title: str, body: str, tag: str):
 
 def check_and_notify():
     state = _ensure_today_schedule_remote(_load_state_remote())
-    slots_state = get_state(SLOTS_KEY, default={})
+    slots_state = get_state(slots_key(today_ist().isoformat()), default={})
     now = now_ist()
     changed = False
 

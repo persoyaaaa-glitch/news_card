@@ -11,6 +11,30 @@ function nowIST() {
   return new Date(utcMs + IST_OFFSET_MIN * 60000);
 }
 
+// "YYYY-MM-DD" for an IST-shifted Date (e.g. from nowIST()) - matches
+// the date strings daily_scheduler.py uses as slots_key() suffixes, so
+// the client can compute which per-date keys to ask Supabase for
+// without needing a round trip just to find out what "today" is.
+function isoDateStrIST(d) {
+  return d.toISOString().slice(0, 10);
+}
+
+function todayStrIST() {
+  return isoDateStrIST(nowIST());
+}
+
+// [today, yesterday, ...] date strings, oldest last - matches the
+// order daily_slots rows are shown/swiped through in the app.
+function recentDateStrsIST(count) {
+  const out = [];
+  const d = nowIST();
+  for (let i = 0; i < count; i++) {
+    out.push(isoDateStrIST(d));
+    d.setDate(d.getDate() - 1);
+  }
+  return out;
+}
+
 function fmtTime(d) {
   return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
 }
@@ -46,8 +70,14 @@ function plannedTimeOf(slot, lang) {
 
 // ---- Supabase (read-only anon access, RLS-restricted - see supabase_app_additions.sql) ----
 
-async function fetchDailySlots() {
-  const url = `${CONFIG.SUPABASE_URL}/rest/v1/app_state?key=eq.daily_slots&select=value`;
+// DAYS_KEPT must match daily_scheduler.py's DAILY_SLOTS_KEEP_DAYS - how
+// many per-date daily_slots:* rows the backend keeps around (and the
+// anon RLS policy allows reading - see migration_daily_slots_history.sql).
+// Swiping further back than this just has nothing to show.
+const DAYS_KEPT = 2;
+
+async function fetchDailySlotsFor(dateStr) {
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/app_state?key=eq.daily_slots:${dateStr}&select=value`;
   const resp = await fetch(url, {
     headers: {
       apikey: CONFIG.SUPABASE_ANON_KEY,
@@ -56,8 +86,38 @@ async function fetchDailySlots() {
   });
   if (!resp.ok) throw new Error(`Failed to load schedule (${resp.status})`);
   const rows = await resp.json();
-  if (!rows.length) return { date: null, slots: [] };
-  return rows[0].value;
+  return rows.length ? rows[0].value : null;
+}
+
+// Today's schedule specifically - used by the home-screen "next up"
+// badge, which should always reflect today regardless of which day the
+// open schedule view is currently swiped to.
+async function fetchDailySlots() {
+  const dateStr = todayStrIST();
+  return (await fetchDailySlotsFor(dateStr)) || { date: dateStr, slots: [] };
+}
+
+// Fetches the last `count` days' daily_slots rows in ONE request (keys
+// daily_slots:D0,daily_slots:D1,... via the REST `in.()` filter) rather
+// than one round trip per day - this is what powers the swipe-between-
+// days view. Returns an array the same length as `count`, oldest last,
+// with { date, slots: [] } placeholders for any day that has no row yet
+// (e.g. day 1 of ever running this, or a gap).
+async function fetchRecentDaysSlots(count) {
+  const dateStrs = recentDateStrsIST(count);
+  const keys = dateStrs.map((d) => `daily_slots:${d}`).join(",");
+  const url = `${CONFIG.SUPABASE_URL}/rest/v1/app_state?key=in.(${keys})&select=value`;
+  const resp = await fetch(url, {
+    headers: {
+      apikey: CONFIG.SUPABASE_ANON_KEY,
+      Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+    },
+  });
+  if (!resp.ok) throw new Error(`Failed to load schedule (${resp.status})`);
+  const rows = await resp.json();
+  const byDate = {};
+  rows.forEach((r) => { byDate[r.value.date] = r.value; });
+  return dateStrs.map((d) => byDate[d] || { date: d, slots: [] });
 }
 
 async function fetchRepoTraffic() {
@@ -165,6 +225,34 @@ async function triggerGenerateSlot(dateStr, slotIndex) {
   }
 }
 
+// Fires the post-slot-now Edge Function, which dispatches post-now.yml
+// on GitHub to publish ONE specific slot/language immediately -
+// ignoring its planned_time and the MIN_GAP_MINUTES cooldown. This is
+// the "Post now" button: both a manual override for a slot you just
+// want out right away, and the rescue path for one that's overdue
+// because an earlier auto-post attempt failed - instead of waiting for
+// the next scheduler.yml tick to retry it, this fires an attempt now.
+async function triggerPostNow(dateStr, slotIndex, lang) {
+  try {
+    const resp = await fetch(`${CONFIG.SUPABASE_URL}/functions/v1/post-slot-now`, {
+      method: "POST",
+      headers: {
+        apikey: CONFIG.SUPABASE_ANON_KEY,
+        Authorization: `Bearer ${CONFIG.SUPABASE_ANON_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ slot_date: dateStr, slot_index: slotIndex, lang }),
+    });
+    const data = await resp.json().catch(() => null);
+    if (!resp.ok || !data || !data.ok) {
+      return { ok: false, error: (data && data.error) || `couldn't start (${resp.status})` };
+    }
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: "check your connection" };
+  }
+}
+
 async function saveSubscription(sub) {
   const json = sub.toJSON();
   const url = `${CONFIG.SUPABASE_URL}/rest/v1/push_subscriptions`;
@@ -228,6 +316,7 @@ function updateAccountHeader(lang) {
 
 function selectAccount(lang) {
   currentAccountLang = lang;
+  viewedDayOffset = 0; // always land on today's schedule when opening/switching an account
   document.getElementById("homeScreen").hidden = true;
   document.getElementById("app").hidden = false;
   updateAccountHeader(lang);
@@ -323,10 +412,31 @@ let currentSlots = [];
 let currentManualIndices = new Set();
 let currentDateStr = null;
 
+// Which day of the DAYS_KEPT-day rolling window is currently shown -
+// 0 = today, 1 = yesterday, etc. dayDataCache holds whatever
+// fetchRecentDaysSlots() last returned, in the same order, so swiping
+// between already-fetched days is instant (no re-fetch, just re-render
+// from cache) - see goToDay().
+let viewedDayOffset = 0;
+let dayDataCache = [];
+
+function isViewingHistorical() {
+  // Based on the actual rendered date, not viewedDayOffset - covers
+  // every render() call path (swipe, poll refresh, post-action
+  // re-render after marking a slot manual, etc.) with one check.
+  return !!currentDateStr && currentDateStr !== todayStrIST();
+}
+
 // slot.index values with a "Generate now" build currently in flight (this
 // browser tab only - just drives the "Generating..." UI state, the real
 // source of truth is whether the slot has content in Supabase).
 const generatingSlotIndices = new Set();
+
+// Same idea as generatingSlotIndices, but for a "Post now" publish
+// currently in flight - drives the "Posting..." UI state while
+// post-now.yml runs on GitHub. Real source of truth is still the
+// posted/posted_hi flag from Supabase.
+const postingSlotIndices = new Set();
 
 // Status now reflects the REAL posted/posted_hi flag from the backend
 // (daily_scheduler.py writes this the moment a post is CONFIRMED to
@@ -409,7 +519,9 @@ function render(data, manualIndices) {
     // No content built for this slot yet (and it hasn't already posted) -
     // offer to build it now instead of waiting for the rolling 30-min
     // pre-build window to reach it. Tapping this never opens the modal.
-    if (!topStory && status !== "past") {
+    // Never offered on a historical (non-today) day - "generate now"
+    // only makes sense for a slot that hasn't fired yet.
+    if (!topStory && status !== "past" && !isViewingHistorical()) {
       const isGenerating = generatingSlotIndices.has(slot.index);
       const genBtn = document.createElement("button");
       genBtn.type = "button";
@@ -421,6 +533,25 @@ function render(data, manualIndices) {
         generateSlotNow(slot);
       });
       row.appendChild(genBtn);
+    }
+
+    // Content's built (or the slot's overdue/due) but not posted yet -
+    // offer to publish it right now instead of waiting for the normal
+    // scheduled time / the next 30-min scheduler tick to retry it.
+    // Never offered for a slot flagged Manual (you said you'd post it
+    // yourself) or on a historical day.
+    if (topStory && status !== "past" && !isManual && !isViewingHistorical()) {
+      const isPosting = postingSlotIndices.has(slot.index);
+      const postBtn = document.createElement("button");
+      postBtn.type = "button";
+      postBtn.className = "slot-postnow-btn";
+      postBtn.textContent = isPosting ? "Posting..." : "Post now";
+      postBtn.disabled = isPosting;
+      postBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        postSlotNow(slot, lang);
+      });
+      row.appendChild(postBtn);
     }
 
     list.appendChild(row);
@@ -438,7 +569,7 @@ function updateGenerateBlock(slot) {
   const hasContent = (slot.stories || []).length > 0;
   const isPast = slotStatus(slot) === "past";
 
-  if (hasContent || isPast) {
+  if (hasContent || isPast || isViewingHistorical()) {
     block.hidden = true;
     return;
   }
@@ -518,6 +649,97 @@ function pollForSlotContent(slotIndex, attemptsLeft = 20) {
   }, 15000);
 }
 
+// ---- Post now (force-publish a not-yet-posted slot immediately) ----
+
+// Shows/hides the modal's "Post now" block for whichever slot the
+// modal currently has open, and (re)wires its click handler. Belongs
+// to whichever language tab is currently open in the modal (unlike the
+// manual-takeover button, which always belongs to the account you
+// opened the modal from) - posting is a per-language action.
+function updatePostNowBlock(slot) {
+  const block = document.getElementById("postNowBlock");
+  const btn = document.getElementById("postNowBtn");
+  const status = document.getElementById("postNowStatus");
+  const lang = currentModalLang;
+  const hasContent = (lang === "hi" ? (slot.image_urls_hi || []) : (slot.image_urls || [])).length > 0;
+  const isPosted = lang === "hi" ? slot.posted_hi : slot.posted;
+  const isManual = currentManualIndices.has(slot.index);
+
+  if (!hasContent || isPosted || isManual || isViewingHistorical()) {
+    block.hidden = true;
+    return;
+  }
+  block.hidden = false;
+  const isPosting = postingSlotIndices.has(slot.index);
+  btn.disabled = isPosting;
+  btn.textContent = isPosting ? "Posting..." : "Post now";
+  if (!isPosting && !status.dataset.errorShown) status.textContent = "";
+  btn.onclick = () => postSlotNow(slot, lang, status);
+}
+
+// Kicks off an immediate publish for one slot/language, then polls
+// every 15s (up to ~5 min) until the posted/posted_hi flag actually
+// flips, refreshing the list and (if still open) the modal as soon as
+// it does. Ignores the slot's planned_time and the normal
+// MIN_GAP_MINUTES cooldown - see post_now() in daily_scheduler.py.
+async function postSlotNow(slot, lang, statusEl) {
+  if (!currentDateStr || postingSlotIndices.has(slot.index)) return;
+
+  postingSlotIndices.add(slot.index);
+  if (statusEl) {
+    statusEl.textContent = "Starting...";
+    delete statusEl.dataset.errorShown;
+  }
+  render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+  if (currentModalSlot && currentModalSlot.index === slot.index) updatePostNowBlock(currentModalSlot);
+
+  const result = await triggerPostNow(currentDateStr, slot.index, lang);
+  if (!result.ok) {
+    postingSlotIndices.delete(slot.index);
+    if (statusEl) {
+      statusEl.textContent = `Couldn't start: ${result.error}`;
+      statusEl.dataset.errorShown = "1";
+    }
+    render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+    if (currentModalSlot && currentModalSlot.index === slot.index) updatePostNowBlock(currentModalSlot);
+    return;
+  }
+
+  if (statusEl) statusEl.textContent = "Posting - takes a minute or two, checking automatically...";
+  pollForSlotPosted(slot.index, lang);
+}
+
+function pollForSlotPosted(slotIndex, lang, attemptsLeft = 20) {
+  if (!postingSlotIndices.has(slotIndex)) return; // cancelled/superseded elsewhere
+  if (attemptsLeft <= 0) {
+    postingSlotIndices.delete(slotIndex);
+    render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+    if (currentModalSlot && currentModalSlot.index === slotIndex) {
+      updatePostNowBlock(currentModalSlot);
+      document.getElementById("postNowStatus").textContent =
+        "Still working - this is taking longer than usual. It'll flip to posted here once it lands.";
+    }
+    return;
+  }
+  setTimeout(async () => {
+    await refresh(); // re-fetches and calls render() itself
+    const slot = currentSlots.find((s) => s.index === slotIndex);
+    const posted = slot && (lang === "hi" ? slot.posted_hi : slot.posted);
+    if (posted) {
+      postingSlotIndices.delete(slotIndex);
+      render({ date: currentDateStr, slots: currentSlots }, currentManualIndices);
+      if (currentModalSlot && currentModalSlot.index === slotIndex) {
+        Object.assign(currentModalSlot, slot);
+        renderModalLang(currentModalLang);
+        populateStoryList(currentModalSlot);
+        updatePostNowBlock(currentModalSlot);
+      }
+      return;
+    }
+    pollForSlotPosted(slotIndex, lang, attemptsLeft - 1);
+  }, 15000);
+}
+
 function updateProgress(done, total) {
   document.getElementById("progressLabel").textContent = `${done}/${total}`;
   document.getElementById("progressFill").style.width = total ? `${(done / total) * 100}%` : "0%";
@@ -555,11 +777,15 @@ function openModal(slot) {
   populateStoryList(slot);
   delete document.getElementById("generateStatus").dataset.errorShown;
   updateGenerateBlock(slot);
+  delete document.getElementById("postNowStatus").dataset.errorShown;
+  updatePostNowBlock(slot);
 
   const reviewBtn = document.getElementById("reviewBtn");
   const hasCandidates = (slot.candidates || []).length > 0;
   const alreadyPast = slotStatus(slot) === "past";
-  reviewBtn.hidden = !hasCandidates;
+  // Reviewing/reordering only makes sense for a slot that hasn't
+  // posted yet - never offered when looking back at a past day.
+  reviewBtn.hidden = !hasCandidates || isViewingHistorical();
   reviewBtn.disabled = alreadyPast;
   reviewBtn.textContent = alreadyPast
     ? "Already posted \u2014 can't review"
@@ -574,6 +800,11 @@ function openModal(slot) {
   // version myself," regardless of which tab you're glancing at.
   const takeoverLang = currentAccountLang || "en";
   const alreadyManual = currentManualIndices.has(slot.index);
+  // "Take over and post manually" is a same-day action - hide it
+  // entirely on a historical day rather than let someone tap it for a
+  // slot that's already long past.
+  manualBtn.hidden = isViewingHistorical();
+  manualStatus.hidden = isViewingHistorical();
   manualBtn.disabled = alreadyManual;
   manualBtn.textContent = alreadyManual
     ? "Taken over \u2014 auto-post skipped for this one"
@@ -582,7 +813,7 @@ function openModal(slot) {
     ? "Download the slides above and post it yourself; the app will pick it up once it's live."
     : "";
   manualBtn.onclick = async () => {
-    if (!currentDateStr) return;
+    if (!currentDateStr || isViewingHistorical()) return;
     manualBtn.disabled = true;
     manualBtn.textContent = "Marking...";
     const ok = await markSlotManual(currentDateStr, slot.index, takeoverLang);
@@ -648,6 +879,10 @@ function renderModalLang(lang) {
   document.getElementById("copyBtn").onclick = () => copyCaption(caption);
   document.getElementById("copyBtn").classList.remove("copied");
   document.getElementById("copyBtn").textContent = "Copy";
+
+  // Post now belongs to whichever language tab is now active, so it
+  // has to be recomputed every time the tab (and thus `lang`) changes.
+  updatePostNowBlock(slot);
 }
 
 function populateStoryList(slot) {
@@ -1270,9 +1505,15 @@ async function refresh() {
   if (!currentAccountLang) return; // nothing to load until an account is picked on the home screen
   const lang = currentAccountLang;
   try {
-    const data = await fetchDailySlots();
+    const days = await fetchRecentDaysSlots(DAYS_KEPT);
+    dayDataCache = days;
+    // Re-fetching (e.g. the polling interval below) shouldn't yank the
+    // user back to "today" if they're mid-swipe on a previous day -
+    // just refresh whichever day they're currently viewing, in place.
+    const data = dayDataCache[viewedDayOffset] || dayDataCache[0];
     const manualIndices = data.date ? await fetchManualIndices(data.date, lang) : new Set();
     render(data, manualIndices);
+    updateDaySwipeUI();
   } catch (e) {
     console.error(e);
   }
@@ -1283,6 +1524,65 @@ async function refresh() {
     console.error(e);
   }
 }
+
+// Re-renders from the already-fetched dayDataCache - no network call,
+// so swiping feels instant. Clamped to whatever range actually came
+// back (a brand-new account might not have DAYS_KEPT days of history
+// yet).
+function goToDay(offset) {
+  const clamped = Math.max(0, Math.min(offset, dayDataCache.length - 1));
+  if (clamped === viewedDayOffset || !dayDataCache.length) return;
+  viewedDayOffset = clamped;
+  const lang = currentAccountLang || "en";
+  const data = dayDataCache[viewedDayOffset];
+  const list = document.getElementById("list");
+  list.classList.add("swiping");
+  (data.date ? fetchManualIndices(data.date, lang) : Promise.resolve(new Set())).then((manualIndices) => {
+    render(data, manualIndices);
+    updateDaySwipeUI();
+    list.classList.remove("swiping");
+  });
+}
+
+function updateDaySwipeUI() {
+  const row = document.getElementById("daySwipeRow");
+  const dots = document.getElementById("daySwipeDots");
+  if (!row || !dots) return;
+  if (dayDataCache.length <= 1) {
+    row.hidden = true;
+    return;
+  }
+  row.hidden = false;
+  dots.innerHTML = dayDataCache
+    .map((_, i) => `<span class="${i === viewedDayOffset ? "active" : ""}"></span>`)
+    .join("");
+}
+
+// ---- Swipe between days ----
+//
+// Attached to #list rather than the whole app so it doesn't fight with
+// vertical scrolling of the slot rows themselves - a swipe only fires
+// when the horizontal movement clearly dominates the vertical one.
+(function setupDaySwipe() {
+  const list = document.getElementById("list");
+  let startX = null;
+  let startY = null;
+  list.addEventListener("touchstart", (e) => {
+    startX = e.touches[0].clientX;
+    startY = e.touches[0].clientY;
+  }, { passive: true });
+  list.addEventListener("touchend", (e) => {
+    if (startX === null) return;
+    const dx = e.changedTouches[0].clientX - startX;
+    const dy = e.changedTouches[0].clientY - startY;
+    startX = null;
+    const SWIPE_THRESHOLD = 55;
+    if (Math.abs(dx) < SWIPE_THRESHOLD || Math.abs(dx) < Math.abs(dy) * 1.3) return;
+    // Swipe left (finger moves right-to-left, dx < 0) -> go back a day.
+    // Swipe right -> go forward toward today.
+    goToDay(viewedDayOffset + (dx < 0 ? 1 : -1));
+  }, { passive: true });
+})();
 
 function renderTraffic(traffic) {
   const el = document.getElementById("trafficLabel");

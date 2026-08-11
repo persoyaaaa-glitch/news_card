@@ -34,6 +34,12 @@ body{
 }
 .clock{font-family:'JetBrains Mono',monospace;font-size:14px;color:var(--text-dim);}
 .hdr-date{font-size:26px;font-weight:800;margin-top:6px;letter-spacing:-.01em;}
+.day-swipe-row{display:flex;align-items:center;gap:8px;margin-top:6px;}
+.day-swipe-dots{display:flex;gap:5px;}
+.day-swipe-dots span{width:6px;height:6px;border-radius:50%;background:rgba(255,255,255,.25);display:inline-block;}
+.day-swipe-dots span.active{background:rgba(255,255,255,.85);}
+.day-swipe-hint{font-size:12px;color:rgba(255,255,255,.4);}
+.list.swiping{transition:opacity .12s ease;opacity:.4;}
 .progress-row{display:flex;align-items:center;gap:10px;margin-top:14px;}
 .progress-track{flex:1;height:5px;border-radius:3px;background:var(--panel-2);overflow:hidden;}
 .progress-fill{height:100%;background:var(--amber);width:0%;transition:width .4s ease;}
@@ -180,6 +186,21 @@ body{
   padding:5px 9px;cursor:pointer;flex-shrink:0;white-space:nowrap;
 }
 .slot-generate-btn:disabled{opacity:.6;cursor:default;background:var(--panel-2);color:var(--text-dim);}
+
+/* "Post now" (force-publish a not-yet-posted slot immediately) */
+.postnow-block[hidden]{display:none;}
+.postnow-btn{
+  width:100%;padding:13px;border-radius:10px;border:none;
+  background:var(--red);color:#2a0a0a;font-family:'Archivo',sans-serif;
+  font-weight:700;font-size:14px;cursor:pointer;
+}
+.postnow-btn:disabled{opacity:.6;cursor:default;}
+.slot-postnow-btn{
+  font-family:'JetBrains Mono',monospace;font-size:10px;letter-spacing:.05em;
+  color:#2a0a0a;background:var(--red);border:none;border-radius:6px;
+  padding:5px 9px;cursor:pointer;flex-shrink:0;white-space:nowrap;
+}
+.slot-postnow-btn:disabled{opacity:.6;cursor:default;background:var(--panel-2);color:var(--text-dim);}
 
 /* Review modal (pick/reorder which candidate stories post) */
 .review-list{display:flex;flex-direction:column;gap:8px;}

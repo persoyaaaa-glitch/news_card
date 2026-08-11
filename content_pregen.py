@@ -53,7 +53,7 @@ from datetime import datetime
 
 import hourly_run
 from daily_scheduler import (
-    STORIES_PER_POST, CANDIDATE_STORY_COUNT, IMAGES_PER_STORY, SLOTS_KEY,
+    STORIES_PER_POST, CANDIDATE_STORY_COUNT, IMAGES_PER_STORY, slots_key,
     _ensure_today_schedule_remote, _load_state_remote, today_ist, now_ist,
 )
 from supabase_client import get_state, save_state
@@ -62,15 +62,15 @@ BUILD_WINDOW_MINUTES = 30  # build a slot once its post time is this close (or c
 
 
 def _load_slots_state() -> dict:
-    slots_state = get_state(SLOTS_KEY, default={})
     today_str = today_ist().isoformat()
+    slots_state = get_state(slots_key(today_str), default={})
     if slots_state.get("date") != today_str:
         slots_state = {"date": today_str, "slots": []}
     return slots_state
 
 
 def _save_slots_state(slots_state: dict):
-    save_state(SLOTS_KEY, slots_state)
+    save_state(slots_key(slots_state["date"]), slots_state)
 
 
 def _already_built(slots_state: dict, index: int) -> bool:

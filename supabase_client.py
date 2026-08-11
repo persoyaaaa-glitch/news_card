@@ -135,6 +135,28 @@ def save_state(key: str, value):
     }).execute()
 
 
+def delete_state(key: str):
+    """
+    Delete one row from the app_state key/value table, if it exists.
+    Used by daily_scheduler.py's rolling-window cleanup for the
+    per-date daily_slots:YYYY-MM-DD rows (see slots_key() there) -
+    without this, that table would grow by one row every day forever.
+    """
+    client = get_client()
+    client.table("app_state").delete().eq("key", key).execute()
+
+
+def list_state_keys(prefix: str) -> list:
+    """
+    Every app_state key starting with `prefix` (e.g. 'daily_slots:'),
+    so daily_scheduler.py's cleanup can find old per-date rows to
+    delete without needing to already know their exact dates.
+    """
+    client = get_client()
+    resp = client.table("app_state").select("key").like("key", f"{prefix}%").execute()
+    return [row["key"] for row in resp.data]
+
+
 def get_manual_slot_indices(slot_date: str, lang: str = "en") -> set:
     """
     Slot indices the PWA has flagged as 'I'm posting this one myself',

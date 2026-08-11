@@ -1,0 +1,87 @@
+name: Post one slot now (manual)
+
+# Fired by the PWA's "Post now" button - via the post-slot-now Supabase
+# Edge Function, the same GITHUB_DISPATCH_TOKEN/GITHUB_REPO_OWNER/
+# GITHUB_REPO_NAME dispatch pattern trigger-schedule-check and
+# generate-slot already use, so no new secrets are needed for this to
+# work.
+#
+# Publishes ONE specific slot/language immediately - regardless of its
+# planned_time or the MIN_GAP_MINUTES cooldown since the last post on
+# that account - via daily_scheduler.py's post_now(). This is both the
+# "just post this one right now" action AND the rescue path for a slot
+# that's overdue because an earlier auto-post attempt failed (bad
+# content, a transient Instagram error, content_pregen.py not finishing
+# in time): instead of waiting for the next scheduler.yml tick to
+# retry it, this fires an attempt immediately.
+#
+# Refuses to fire on a slot flagged Manual (slot_overrides) for the
+# requested language - see post_now()'s docstring.
+on:
+  workflow_dispatch:
+    inputs:
+      slot_index:
+        description: "0-based index of today's slot to post"
+        required: true
+      lang:
+        description: "Which language track to post: en or hi"
+        required: true
+        default: "en"
+
+# Same concurrency group as scheduler.yml/generate-slot.yml on purpose:
+# all three read-modify-write the same Supabase state, so they must
+# never run at the same time - this queues a manual post behind an
+# in-flight scheduler tick (and vice versa) instead of racing and one
+# clobbering the other's write.
+concurrency:
+  group: news-carousel-scheduler
+  cancel-in-progress: false
+
+jobs:
+  post-now:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Build content for this slot first, if it isn't built yet
+        # Best-effort - if this step fails, or the slot already has
+        # content, post_now() below still works fine: for a slot with
+        # no pre-built content it falls back to building fresh content
+        # on the spot for this one language, exactly like the normal
+        # scheduler does for any other unbuilt slot.
+        continue-on-error: true
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID_HI: ${{ secrets.IG_USER_ID_HI }}
+          IG_ACCESS_TOKEN_HI: ${{ secrets.IG_ACCESS_TOKEN_HI }}
+          POST_HINDI_PAGE: ${{ secrets.POST_HINDI_PAGE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python content_pregen.py --slot "${{ inputs.slot_index }}"
+
+      - name: Post it now
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID_HI: ${{ secrets.IG_USER_ID_HI }}
+          IG_ACCESS_TOKEN_HI: ${{ secrets.IG_ACCESS_TOKEN_HI }}
+          POST_HINDI_PAGE: ${{ secrets.POST_HINDI_PAGE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          META_APP_ID: ${{ secrets.META_APP_ID }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+        run: >
+          python daily_scheduler.py
+          --post-now-index "${{ inputs.slot_index }}"
+          --post-now-lang "${{ inputs.lang }}"

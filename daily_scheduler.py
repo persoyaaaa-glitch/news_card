@@ -48,6 +48,8 @@ import hourly_run
 from supabase_client import (
     get_state,
     save_state,
+    delete_state,
+    list_state_keys,
     get_manual_slot_indices,
     get_schedule_override,
 )
@@ -61,7 +63,21 @@ from supabase_client import (
 
 STATE_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scheduler_state.json")
 STATE_KEY = "scheduler_state"  # Supabase app_state key, used by check_once()
-SLOTS_KEY = "daily_slots"      # Supabase app_state key holding pre-generated content, written by content_pregen.py
+
+# Each day's pre-generated content gets its OWN app_state row - key
+# "daily_slots:YYYY-MM-DD" - instead of one row that gets overwritten
+# every day, so the PWA can keep showing a rolling window of past days
+# (swipe between them) instead of only ever having today's. See
+# slots_key() below. DAILY_SLOTS_KEEP_DAYS rows are kept around at a
+# time; _cleanup_old_daily_slots() deletes anything older, run once
+# each time a new day's row is first published (see
+# _publish_schedule_skeleton).
+SLOTS_KEY_PREFIX = "daily_slots"
+DAILY_SLOTS_KEEP_DAYS = 2
+
+
+def slots_key(date_str: str) -> str:
+    return f"{SLOTS_KEY_PREFIX}:{date_str}"
 
 LANGS = ("en", "hi")
 
@@ -225,16 +241,43 @@ def _save_state_remote(state: dict):
     save_state(STATE_KEY, state)
 
 
+def _cleanup_old_daily_slots(keep_days: int = DAILY_SLOTS_KEEP_DAYS):
+    """
+    Deletes daily_slots:YYYY-MM-DD rows older than the most recent
+    `keep_days` dates. Best-effort - a failure here (e.g. a transient
+    network error) must never block today's schedule from being
+    published, so every error is swallowed and just logged.
+    """
+    try:
+        keys = list_state_keys(f"{SLOTS_KEY_PREFIX}:")
+        dates = sorted(k.split(":", 1)[1] for k in keys if ":" in k)
+        stale_dates = dates[:-keep_days] if len(dates) > keep_days else []
+        for d in stale_dates:
+            delete_state(slots_key(d))
+        if stale_dates:
+            print(f"[{now_ist().isoformat()}] Cleaned up {len(stale_dates)} old "
+                  f"daily_slots row(s): {stale_dates}")
+    except Exception as e:
+        print(f"[{now_ist().isoformat()}] daily_slots cleanup failed (non-fatal): {e}")
+
+
 def _publish_schedule_skeleton(today_str: str, planned_en: list, planned_hi: list):
     """
-    Pushes JUST the time slots (no content yet) to app_state[SLOTS_KEY] the
-    moment today's schedule is decided, so the companion PWA can show the
-    whole day's timestamps for both languages immediately at midnight.
-    Each slot's actual carousel content (image_urls/caption/stories and
-    their _hi counterparts) gets filled in later, ~30 min before that
-    slot's own EARLIEST post time - see content_pregen.py.
+    Pushes JUST the time slots (no content yet) to
+    app_state[slots_key(today_str)] the moment today's schedule is
+    decided, so the companion PWA can show the whole day's timestamps
+    for both languages immediately at midnight. Each slot's actual
+    carousel content (image_urls/caption/stories and their _hi
+    counterparts) gets filled in later, ~30 min before that slot's own
+    EARLIEST post time - see content_pregen.py.
+
+    Also triggers the rolling-window cleanup of old daily_slots:* rows
+    (see _cleanup_old_daily_slots) - this function only ever runs once
+    per day, right when a new day's row is first created, which is
+    exactly the right moment to prune anything past the retention
+    window.
     """
-    save_state(SLOTS_KEY, {
+    save_state(slots_key(today_str), {
         "date": today_str,
         "slots": [
             {
@@ -248,11 +291,12 @@ def _publish_schedule_skeleton(today_str: str, planned_en: list, planned_hi: lis
             for i, (t_en, t_hi) in enumerate(zip(planned_en, planned_hi))
         ],
     })
+    _cleanup_old_daily_slots()
 
 
 def _sync_slots_skeleton(state: dict):
     """
-    Re-syncs app_state[SLOTS_KEY] (the PWA's display) with the current
+    Re-syncs app_state[slots_key(state["date"])] (the PWA's display) with the current
     planned_times/planned_times_hi after a schedule override changed the
     slot count or times - adds skeleton entries for newly-added slots,
     drops entries for slots that were removed, and updates planned_time /
@@ -264,7 +308,7 @@ def _sync_slots_skeleton(state: dict):
     app's display lags behind until the next successful sync.
     """
     try:
-        slots_state = get_state(SLOTS_KEY, default={})
+        slots_state = get_state(slots_key(state["date"]), default={})
         if slots_state.get("date") != state["date"]:
             _publish_schedule_skeleton(
                 state["date"],
@@ -289,7 +333,7 @@ def _sync_slots_skeleton(state: dict):
                     "posted": False, "posted_hi": False,
                 })
         slots_state["slots"] = new_slots
-        save_state(SLOTS_KEY, slots_state)
+        save_state(slots_key(state["date"]), slots_state)
     except Exception as e:
         print(f"[{now_ist().isoformat()}] Schedule override: failed to sync the daily_slots "
               f"skeleton (non-fatal - app display may lag, will retry next check): {e}")
@@ -523,7 +567,7 @@ def _get_prebuilt_slot(due_index: int):
     image list is non-empty, since content_pregen.py can in principle
     finish one language before the other.
     """
-    slots_state = get_state(SLOTS_KEY, default={})
+    slots_state = get_state(slots_key(today_ist().isoformat()), default={})
     if slots_state.get("date") != today_ist().isoformat():
         return None
     for slot in slots_state.get("slots", []):
@@ -534,7 +578,7 @@ def _get_prebuilt_slot(due_index: int):
 
 def _mark_slot_posted_in_skeleton(index: int, lang: str, content: dict | None = None):
     """
-    Writes the real posted/posted_hi flag into app_state[SLOTS_KEY] (the
+    Writes the real posted/posted_hi flag into app_state[slots_key(today)] (the
     PWA's daily_slots display) for one slot/language, the moment that
     slot is CONFIRMED posted. Previously daily_slots never carried a
     posted flag at all - the PWA had to guess status purely from
@@ -553,7 +597,8 @@ def _mark_slot_posted_in_skeleton(index: int, lang: str, content: dict | None = 
     the app's display lags until the next successful sync.
     """
     try:
-        slots_state = get_state(SLOTS_KEY, default={})
+        today_str = today_ist().isoformat()
+        slots_state = get_state(slots_key(today_str), default={})
         posted_field = "posted" if lang == "en" else "posted_hi"
         for slot in slots_state.get("slots", []):
             if slot.get("index") == index:
@@ -574,7 +619,7 @@ def _mark_slot_posted_in_skeleton(index: int, lang: str, content: dict | None = 
                         if content.get("stories") and not slot.get("stories"):
                             slot["stories"] = content["stories"]
                 break
-        save_state(SLOTS_KEY, slots_state)
+        save_state(slots_key(today_str), slots_state)
     except Exception as e:
         print(f"[{now_ist().isoformat()}] Failed to mark slot #{index + 1} ({lang}) posted "
               f"in the daily_slots skeleton (non-fatal - app display may lag): {e}")
@@ -796,6 +841,84 @@ def _attempt_fire_slot(state: dict, lang: str, due_index: int, times_key: str,
     return True
 
 
+def post_now(slot_index: int, lang: str) -> bool:
+    """
+    Manual "Post now" trigger from the PWA - fired via the
+    post-slot-now Supabase Edge Function -> post-now.yml workflow.
+    Publishes ONE specific slot/language immediately, bypassing the two
+    checks _fire_due_slot_for_lang normally enforces for ordinary
+    scheduled posting:
+      - the due-time check (state[times_key][slot_index] <= now) - a
+        human tapping "Post now" doesn't want to wait for the planned
+        time, that's the whole point of the button.
+      - MIN_GAP_MINUTES since the last post on this account - same
+        reasoning; an explicit manual request overrides the spacing
+        heuristic that only exists to keep the RANDOM auto-schedule
+        from looking spammy.
+
+    This is also the fix for "a carousel that didn't post for some
+    reason" - an overdue slot whose auto-post attempt failed (bad
+    content, a transient Instagram error, content_pregen.py not having
+    built it in time) sits un-posted and gets silently retried on every
+    scheduler.yml tick already, but that can take up to ~30 min per
+    attempt; tapping Post now on it here fires an attempt right away
+    instead of waiting for the next tick.
+
+    Reuses _attempt_fire_slot for the actual publish, so a manual post
+    gets the exact same "only mark posted if actually confirmed live"
+    safety net as every scheduled post - a failed attempt here still
+    just leaves the slot un-posted (not falsely marked done), so the
+    normal cron and/or another Post now tap will pick it back up.
+
+    Refuses to fire on a slot flagged Manual (slot_overrides) for this
+    language - Manual means the human said they'll post that one
+    themselves outside the app, so auto-firing underneath them risks a
+    duplicate. Returns True if the slot ends up posted (including if it
+    already was), False otherwise.
+    """
+    state = _load_state_remote()
+    state = _ensure_today_schedule_remote(state)
+
+    times_key = "planned_times" if lang == "en" else "planned_times_hi"
+    posted_key = "posted" if lang == "en" else "posted_hi"
+    last_post_key = "last_post_time" if lang == "en" else "last_post_time_hi"
+
+    if slot_index < 0 or slot_index >= len(state[times_key]):
+        print(f"Post now: slot index {slot_index} is out of range - today has "
+              f"{len(state[times_key])} slot(s).")
+        return False
+
+    if state[posted_key][slot_index]:
+        print(f"Post now: slot #{slot_index + 1} ({lang}) is already posted - nothing to do.")
+        return True
+
+    try:
+        manual_indices = get_manual_slot_indices(state["date"], lang=lang)
+    except Exception as e:
+        manual_indices = set()
+        print(f"Post now: failed to check the Manual flag, proceeding as if it's not manual: {e}")
+    if slot_index in manual_indices:
+        print(f"Post now: slot #{slot_index + 1} ({lang}) is flagged Manual - refusing to "
+              f"auto-post over a slot you said you'd post yourself.")
+        return False
+
+    now = now_ist()
+    fired = _attempt_fire_slot(state, lang, slot_index, times_key, posted_key, last_post_key, now)
+
+    try:
+        _save_state_remote(state)
+    except Exception as e:
+        print(f"Post now: publish attempt finished but saving state to Supabase failed - if it "
+              f"actually posted, the next scheduler tick may re-attempt this slot. Manually "
+              f"verify before assuming a duplicate is coming: {e}")
+        traceback.print_exc()
+
+    if not fired:
+        print(f"Post now: slot #{slot_index + 1} ({lang}) did not actually go out - it's left "
+              f"un-posted so the normal scheduler.yml cron (or another Post now tap) retries it.")
+    return fired
+
+
 def check_once():
     """
     One-shot version of run_forever()'s loop body, meant to be invoked by
@@ -909,9 +1032,23 @@ if __name__ == "__main__":
              "state, then exit. Use this mode when invoked by an external scheduler like "
              "GitHub Actions cron.",
     )
+    parser.add_argument(
+        "--post-now-index", type=int, default=None,
+        help="Publish ONE specific slot by its 0-based index right now, ignoring its planned "
+             "time and the MIN_GAP_MINUTES cooldown (used by the PWA's 'Post now' button, via "
+             "post-now.yml). Pair with --post-now-lang.",
+    )
+    parser.add_argument(
+        "--post-now-lang", choices=LANGS, default="en",
+        help="Which language track --post-now-index applies to ('en' or 'hi'). Ignored "
+             "without --post-now-index.",
+    )
     args = parser.parse_args()
 
-    if args.check_once:
+    if args.post_now_index is not None:
+        ok = post_now(args.post_now_index, args.post_now_lang)
+        raise SystemExit(0 if ok else 1)
+    elif args.check_once:
         check_once()
     else:
         run_forever()

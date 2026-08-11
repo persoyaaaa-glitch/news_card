@@ -43,6 +43,10 @@
       </div>
     </div>
     <div class="hdr-date" id="dateLabel">Loading today's schedule&hellip;</div>
+    <div class="day-swipe-row" id="daySwipeRow" hidden>
+      <span class="day-swipe-dots" id="daySwipeDots"></span>
+      <span class="day-swipe-hint">Swipe to see other days</span>
+    </div>
     <div class="progress-row">
       <div class="progress-track"><div class="progress-fill" id="progressFill"></div></div>
       <span class="progress-label" id="progressLabel">0/0</span>
@@ -89,6 +93,12 @@
       <div class="download-status" id="generateStatus"></div>
       <p class="field-hint">This only builds the images/caption early &mdash; it still posts
         automatically at its scheduled time, not right away.</p>
+    </div>
+
+    <div class="postnow-block" id="postNowBlock" hidden>
+      <button class="postnow-btn" id="postNowBtn">Post now</button>
+      <div class="download-status" id="postNowStatus"></div>
+      <p class="field-hint">Publishes this slot right away, skipping its scheduled time.</p>
     </div>
 
     <div class="slides-scroller" id="slidesScroller"></div>

@@ -136,7 +136,7 @@ Deno.serve(async (req) => {
     "Content-Type": "application/json",
   };
 
-  const getResp = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.daily_slots&select=value`, { headers });
+  const getResp = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.daily_slots:${slot_date}&select=value`, { headers });
   if (!getResp.ok) {
     return jsonResponse({ ok: false, error: `failed to read daily_slots (${getResp.status})` }, 502);
   }
@@ -178,7 +178,7 @@ Deno.serve(async (req) => {
   slot.caption_hi = caption_hi;
   slot.stories = stories;
 
-  const patchResp = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.daily_slots`, {
+  const patchResp = await fetch(`${SUPABASE_URL}/rest/v1/app_state?key=eq.daily_slots:${slot_date}`, {
     method: "PATCH",
     headers: { ...headers, Prefer: "return=minimal" },
     body: JSON.stringify({ value: state, updated_at: new Date().toISOString() }),

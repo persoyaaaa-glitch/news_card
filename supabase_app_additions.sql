@@ -37,15 +37,22 @@ create policy "anon can update its own subscription row"
     using (true)
     with check (true);
 
--- Lock down app_state so the anon key can only ever read the ONE row the
--- PWA actually needs (today's pre-generated slot content) - nothing else
--- in that table (scheduler_state, token_state, etc.) is exposed.
+-- Lock down app_state so the anon key can only ever read the daily_slots
+-- rows the PWA actually needs (one per date - see daily_scheduler.py's
+-- slots_key() - so it can show a rolling window of past days, not just
+-- today) - nothing else in that table (scheduler_state, token_state,
+-- etc.) is exposed.
+--
+-- NOTE: if you already ran an older version of this file, its policy
+-- only covered the single old `key = 'daily_slots'` row and won't match
+-- the new per-date keys - run migration_daily_slots_history.sql instead
+-- of re-running this block.
 alter table app_state enable row level security;
 
-create policy "anon can read only the daily_slots row"
+create policy "anon can read daily_slots history rows"
     on app_state for select
     to anon
-    using (key = 'daily_slots');
+    using (key like 'daily_slots:%');
 
 create policy "anon can read only the repo_traffic row"
     on app_state for select

@@ -1,22 +1,21 @@
-// generate-slot
+// post-slot-now
 //
-// Called by the PWA's "Generate now" button on a slot that hasn't had
-// its content built yet. Fires generate-slot.yml's workflow_dispatch
-// event on GitHub - same GITHUB_DISPATCH_TOKEN/GITHUB_REPO_OWNER/
-// GITHUB_REPO_NAME secrets trigger-schedule-check already uses, so no
-// new Supabase secrets need to be added for this to work. That
-// workflow runs content_pregen.py --slot <index>, which builds and
-// saves that ONE slot's candidates/images/caption immediately,
-// ignoring the normal 30-min-ahead build window.
-//
-// This does NOT post anything and does NOT touch planned_time - the
-// slot still only actually gets published by the normal scheduler.yml
-// cron once its fixed time arrives, exactly like every other slot.
+// Called by the PWA's "Post now" button. Fires post-now.yml's
+// workflow_dispatch event on GitHub - same GITHUB_DISPATCH_TOKEN/
+// GITHUB_REPO_OWNER/GITHUB_REPO_NAME secrets trigger-schedule-check and
+// generate-slot already use, so no new Supabase secrets need to be
+// added for this to work. That workflow runs daily_scheduler.py's
+// post_now(), which publishes ONE slot/language immediately, ignoring
+// its planned_time and the MIN_GAP_MINUTES cooldown.
 //
 // Before spending an Actions run, this checks the slot against today's
-// real schedule (using the service_role key, same as save-slot-selection)
-// so a stale date or an already-built slot gets rejected with a clear
-// error instead of silently kicking off a wasted/duplicate build.
+// real schedule AND the slot_overrides Manual flag (using the
+// service_role key, same as save-slot-selection/generate-slot), so an
+// already-posted slot, a stale date, or a slot you've taken over
+// manually gets rejected immediately with a clear error instead of
+// silently kicking off a wasted/unwanted Actions run. post_now() on
+// the Python side re-checks both of these itself before actually
+// publishing - this is a UX shortcut, not the only safety net.
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -41,16 +40,19 @@ Deno.serve(async (req) => {
     return jsonResponse({ ok: false, error: "Method not allowed" }, 405);
   }
 
-  let body: { slot_date?: string; slot_index?: number };
+  let body: { slot_date?: string; slot_index?: number; lang?: string };
   try {
     body = await req.json();
   } catch {
     return jsonResponse({ ok: false, error: "invalid JSON body" }, 400);
   }
 
-  const { slot_date, slot_index } = body;
-  if (!slot_date || typeof slot_index !== "number") {
-    return jsonResponse({ ok: false, error: "slot_date and slot_index are required" }, 400);
+  const { slot_date, slot_index, lang } = body;
+  if (!slot_date || typeof slot_index !== "number" || (lang !== "en" && lang !== "hi")) {
+    return jsonResponse(
+      { ok: false, error: "slot_date, slot_index, and lang ('en' or 'hi') are required" },
+      400
+    );
   }
 
   const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
@@ -69,10 +71,12 @@ Deno.serve(async (req) => {
     );
   }
 
+  const headers = { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}` };
+
   // Sanity-check against the real schedule first.
   const getResp = await fetch(
     `${SUPABASE_URL}/rest/v1/app_state?key=eq.daily_slots:${slot_date}&select=value`,
-    { headers: { apikey: SERVICE_ROLE_KEY, Authorization: `Bearer ${SERVICE_ROLE_KEY}` } }
+    { headers }
   );
   if (!getResp.ok) {
     return jsonResponse({ ok: false, error: `failed to read daily_slots (${getResp.status})` }, 502);
@@ -90,12 +94,36 @@ Deno.serve(async (req) => {
     return jsonResponse({ ok: false, error: "slot_index is out of range for today's schedule" }, 400);
   }
   const existing = slots.find((s: any) => s.index === slot_index);
-  if (existing && existing.image_urls && existing.image_urls.length) {
-    return jsonResponse({ ok: false, error: "this slot already has content built" }, 409);
+  const postedField = lang === "hi" ? "posted_hi" : "posted";
+  if (existing && existing[postedField]) {
+    return jsonResponse({ ok: false, error: "this slot is already posted" }, 409);
+  }
+
+  // Refuse a slot flagged Manual for this language - see post_now()'s
+  // docstring for why. Best-effort: if this lookup itself fails, fall
+  // through and let the dispatch happen - post_now() re-checks the
+  // flag server-side before ever publishing, so this pre-check is only
+  // a faster UX shortcut, not the sole safety net.
+  const manualColumn = lang === "hi" ? "manual_hi" : "manual_en";
+  const manualResp = await fetch(
+    `${SUPABASE_URL}/rest/v1/slot_overrides?slot_date=eq.${slot_date}&slot_index=eq.${slot_index}&select=${manualColumn}`,
+    { headers }
+  );
+  if (manualResp.ok) {
+    const manualRows = await manualResp.json();
+    if (manualRows.length && manualRows[0][manualColumn]) {
+      return jsonResponse(
+        {
+          ok: false,
+          error: "this slot is flagged Manual - you said you'd post it yourself, so Post now is disabled for it",
+        },
+        409
+      );
+    }
   }
 
   const resp = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/generate-slot.yml/dispatches`,
+    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/post-now.yml/dispatches`,
     {
       method: "POST",
       headers: {
@@ -103,7 +131,7 @@ Deno.serve(async (req) => {
         Accept: "application/vnd.github+json",
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ ref: "main", inputs: { slot_index: String(slot_index) } }),
+      body: JSON.stringify({ ref: "main", inputs: { slot_index: String(slot_index), lang } }),
     }
   );
 
