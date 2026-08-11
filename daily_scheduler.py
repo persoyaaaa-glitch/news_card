@@ -122,6 +122,18 @@ CANDIDATE_STORY_COUNT = 6  # candidates built per slot for the PWA review screen
 # are tracked and enforced independently of each other.
 MIN_GAP_MINUTES = 25
 
+# An unposted slot more than this many minutes past its planned_time is
+# considered stale and gets SKIPPED (marked skipped[i]=True) instead of
+# fired late - previously there was no cutoff at all, so a slot that
+# missed its window for any reason (content_pregen failure, an IG
+# outage, MIN_GAP_MINUTES pushing it back repeatedly) just sat as a
+# valid "due" candidate forever and would eventually post hours late
+# whenever conditions cleared. Does NOT apply to a slot flagged Manual -
+# those are never auto-fired anyway, see _check_manual_slot. Set to
+# None to disable staleness entirely and restore the old "post
+# whenever" behavior.
+STALE_AFTER_MINUTES = 90
+
 # How often the main loop wakes up to check whether it's time to post.
 # Coarse enough to be cheap, fine enough that posts fire within a minute
 # of their planned time.
@@ -515,8 +527,10 @@ def _ensure_today_schedule_remote(state: dict) -> dict:
             "date": today_str,
             "planned_times": [t.isoformat() for t in planned_en],
             "posted": [False] * len(planned_en),
+            "skipped": [False] * len(planned_en),
             "planned_times_hi": [t.isoformat() for t in planned_hi],
             "posted_hi": [False] * len(planned_hi),
+            "skipped_hi": [False] * len(planned_hi),
             "notified": [False] * len(planned_en),
             "notified_hi": [False] * len(planned_hi),
             "schedule_announced": False,  # flips True once send_notifications.py has pushed the "schedule's ready" alert
@@ -549,6 +563,12 @@ def _ensure_today_schedule_remote(state: dict) -> dict:
         if "notified" not in state:
             state["notified"] = [False] * len(state["planned_times"])
             changed = True
+        if "skipped" not in state:
+            state["skipped"] = [False] * len(state["planned_times"])
+            changed = True
+        if "skipped_hi" not in state:
+            state["skipped_hi"] = [False] * len(state["planned_times_hi"])
+            changed = True
         if "schedule_announced" not in state:
             state["schedule_announced"] = False
             changed = True
@@ -576,7 +596,8 @@ def _get_prebuilt_slot(due_index: int):
     return None
 
 
-def _mark_slot_posted_in_skeleton(index: int, lang: str, content: dict | None = None):
+def _mark_slot_posted_in_skeleton(index: int, lang: str, content: dict | None = None,
+                                   queue_on_failure: bool = True):
     """
     Writes the real posted/posted_hi flag into app_state[slots_key(today)] (the
     PWA's daily_slots display) for one slot/language, the moment that
@@ -592,16 +613,29 @@ def _mark_slot_posted_in_skeleton(index: int, lang: str, content: dict | None = 
     too, so the PWA shows what actually went out instead of an earlier
     failed/empty pregen snapshot for the same slot index.
 
-    Best-effort: failure here never blocks scheduler_state (the source
-    of truth for auto-posting logic) from being saved - it just means
-    the app's display lags until the next successful sync.
+    Best-effort in the sense that a failure here never blocks
+    scheduler_state (the source of truth for auto-posting logic) from
+    being saved - but "best-effort" used to also mean "silent and
+    never retried", which is exactly how scheduler_state and the
+    skeleton drifted out of sync on 2026-08-xx (post_now() checked
+    scheduler_state and refused to re-fire slot 1 EN, while the PWA -
+    reading the skeleton, which never got this write - kept showing it
+    as un-posted). Now: retries once immediately, and if that still
+    fails, records the pending write in scheduler_state under
+    "pending_skeleton_sync" so _reconcile_skeleton_sync() (called at
+    the top of every check_once()) retries it on the next tick instead
+    of it being lost until "the next successful sync" that may never
+    come on its own.
     """
-    try:
-        today_str = today_ist().isoformat()
+    today_str = today_ist().isoformat()
+
+    def _do_write() -> bool:
         slots_state = get_state(slots_key(today_str), default={})
         posted_field = "posted" if lang == "en" else "posted_hi"
+        found = False
         for slot in slots_state.get("slots", []):
             if slot.get("index") == index:
+                found = True
                 slot[posted_field] = True
                 if content:
                     if lang == "en":
@@ -619,10 +653,70 @@ def _mark_slot_posted_in_skeleton(index: int, lang: str, content: dict | None = 
                         if content.get("stories") and not slot.get("stories"):
                             slot["stories"] = content["stories"]
                 break
+        if not found:
+            # Nothing to sync into yet (e.g. skeleton row for today
+            # hasn't been published). Treat as failure so it's queued
+            # for reconciliation rather than silently dropped.
+            return False
         save_state(slots_key(today_str), slots_state)
+        return True
+
+    last_err = None
+    for attempt in range(2):
+        try:
+            if _do_write():
+                return
+            last_err = "matching slot not found in skeleton"
+        except Exception as e:
+            last_err = e
+        if attempt == 0:
+            time.sleep(1)
+
+    print(f"[{now_ist().isoformat()}] FAILED to mark slot #{index + 1} ({lang}) posted "
+          f"in the daily_slots skeleton after retry - state and skeleton are now OUT OF "
+          f"SYNC (scheduler_state says posted, skeleton/PWA will still show un-posted) "
+          f"until reconciliation picks this up: {last_err}")
+    if not queue_on_failure:
+        # Reconciliation call - it manages the pending list itself
+        # (single load/save) to avoid two functions independently
+        # read-modify-writing scheduler_state and racing each other.
+        raise RuntimeError(f"skeleton sync failed for slot #{index + 1} ({lang}): {last_err}")
+    try:
+        state = _load_state_remote()
+        pending = state.setdefault("pending_skeleton_sync", [])
+        pending.append({"index": index, "lang": lang, "content": content})
+        _save_state_remote(state)
     except Exception as e:
-        print(f"[{now_ist().isoformat()}] Failed to mark slot #{index + 1} ({lang}) posted "
-              f"in the daily_slots skeleton (non-fatal - app display may lag): {e}")
+        print(f"[{now_ist().isoformat()}] Also failed to record slot #{index + 1} ({lang}) "
+              f"for reconciliation retry - this drift will need a manual fix: {e}")
+
+
+def _reconcile_skeleton_sync(state: dict):
+    """
+    Retries any skeleton writes that _mark_slot_posted_in_skeleton
+    couldn't complete (queued under state['pending_skeleton_sync']).
+    Called at the top of every check_once(), so a transient Supabase
+    failure on one tick self-heals on the next instead of leaving
+    scheduler_state and the PWA's skeleton silently disagreeing
+    indefinitely - which is exactly the drift that caused post_now()
+    to refuse to re-fire an EN slot the PWA still correctly showed as
+    un-posted.
+    """
+    pending = state.get("pending_skeleton_sync")
+    if not pending:
+        return
+    still_pending = []
+    for item in pending:
+        try:
+            _mark_slot_posted_in_skeleton(item["index"], item["lang"], content=item.get("content"),
+                                           queue_on_failure=False)
+        except Exception as e:
+            print(f"[{now_ist().isoformat()}] Reconciliation retry failed for slot "
+                  f"#{item['index'] + 1} ({item['lang']}), will retry again next tick: {e}")
+            still_pending.append(item)
+    state["pending_skeleton_sync"] = still_pending
+    if still_pending != pending:
+        _save_state_remote(state)
 
 
 def _publish_prebuilt_slot(slot: dict, lang: str) -> bool:
@@ -660,6 +754,7 @@ def _publish_prebuilt_slot(slot: dict, lang: str) -> bool:
 
     print(f"  -> publishing pre-built {lang} content ({len(slot.get('stories', []))} stories, "
           f"{len(image_urls)} images)...")
+    attempt_started_at = time.time()
     try:
         if len(image_urls) >= 2:
             media_id = post_carousel_to_instagram(image_urls, caption, account=lang)
@@ -671,7 +766,14 @@ def _publish_prebuilt_slot(slot: dict, lang: str) -> bool:
         print(f"  -> Instagram publish failed ({lang}): {e}")
         print(f"  -> checking the {lang} account's recent media in case it actually posted "
               f"despite the error...")
-        media_id = find_recent_matching_post(caption, account=lang)
+        # not_before=attempt_started_at is critical here: without it, a
+        # DIFFERENT slot's post made shortly before this attempt began
+        # (e.g. the previous slot, especially if it shares this slot's
+        # #1 story) can fall inside the lookback window and be
+        # mistaken for this attempt's result. See the false-positive
+        # this caused on 2026-08-xx (slot 1 EN marked posted from a
+        # match against slot 0's post).
+        media_id = find_recent_matching_post(caption, account=lang, not_before=attempt_started_at)
         if media_id:
             print(f"  -> confirmed: {lang} post {media_id} actually went live despite the error.")
             return True
@@ -735,6 +837,8 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
     posted_key = "posted" if lang == "en" else "posted_hi"
     last_post_key = "last_post_time" if lang == "en" else "last_post_time_hi"
 
+    skipped_key = "skipped" if lang == "en" else "skipped_hi"
+
     now = now_ist()
     due_indices = []
     for i, iso_time in enumerate(state[times_key]):
@@ -749,6 +853,14 @@ def _fire_due_slot_for_lang(state: dict, lang: str, manual_indices: set) -> bool
                 print(f"[{now.isoformat()}] Failed checking manual slot #{i + 1} ({lang}) "
                       f"against the live feed, will retry next check: {e}")
             continue  # never auto-post a manual slot - just check if you posted it yourself
+        minutes_late = (now - datetime.fromisoformat(iso_time)).total_seconds() / 60
+        if STALE_AFTER_MINUTES is not None and minutes_late > STALE_AFTER_MINUTES:
+            if not state[skipped_key][i]:
+                state[skipped_key][i] = True
+                print(f"[{now.isoformat()}] slot #{i + 1} ({lang}) is {minutes_late:.0f} min "
+                      f"overdue - past the {STALE_AFTER_MINUTES}-min staleness cutoff, marking "
+                      f"skipped instead of posting it late.")
+            continue
         due_indices.append(i)
 
     if not due_indices:
@@ -879,6 +991,11 @@ def post_now(slot_index: int, lang: str) -> bool:
     state = _load_state_remote()
     state = _ensure_today_schedule_remote(state)
 
+    try:
+        _reconcile_skeleton_sync(state)
+    except Exception as e:
+        print(f"Post now: skeleton sync reconciliation failed, proceeding anyway: {e}")
+
     times_key = "planned_times" if lang == "en" else "planned_times_hi"
     posted_key = "posted" if lang == "en" else "posted_hi"
     last_post_key = "last_post_time" if lang == "en" else "last_post_time_hi"
@@ -955,6 +1072,13 @@ def check_once():
               f"from Supabase - aborting this run cleanly, will retry next check: {e}")
         traceback.print_exc()
         return
+
+    try:
+        _reconcile_skeleton_sync(state)
+    except Exception as e:
+        print(f"[{now_ist().isoformat()}] Skeleton sync reconciliation pass failed, "
+              f"will retry next check: {e}")
+        traceback.print_exc()
 
     try:
         override = get_schedule_override(state["date"])

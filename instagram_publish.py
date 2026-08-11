@@ -224,7 +224,8 @@ def post_carousel_to_instagram(image_urls: list, caption: str, account: str = "e
 
 import re
 
-def find_recent_matching_post(caption: str, account: str = "en", lookback_seconds: int = 600, caption_prefix_len: int = 200) -> str | None:
+def find_recent_matching_post(caption: str, account: str = "en", lookback_seconds: int = 600,
+                               not_before: float | None = None) -> str | None:
     """
     Meta's Graph API occasionally returns an error (e.g. the "action is
     blocked" / "Application request limit reached" spam-review response)
@@ -239,23 +240,33 @@ def find_recent_matching_post(caption: str, account: str = "en", lookback_second
     Call this right after a publish call raises, BEFORE deciding the post
     truly failed. It checks the account's most recent media for one whose
     caption matches (in the sense below) and whose timestamp is within
-    lookback_seconds of now. Returns that post's media ID if found, else
-    None (meaning it's safe to conclude the publish really did fail).
+    lookback_seconds of now AND at/after `not_before` (if given). Returns
+    that post's media ID if found, else None (meaning it's safe to
+    conclude the publish really did fail).
 
-    Matching is done on a WINDOW of the caption, not the raw first
-    caption_prefix_len characters - for single-story posts (whole
-    caption is Gemini-written, effectively unique from character one)
-    that's the same thing, but combined/digest posts always start with
-    an identical templated intro line ("Today's top 5 stories - here's
-    what's happening:" / "आज की 5 बड़ी खबरें:") followed by "1. " before
-    any story-specific text begins. That boilerplate is IDENTICAL across
-    every digest post ever made, on any day, so comparing raw prefixes
-    against it - with a 60-char window as this used to do - meant most
-    of the compared text carried no distinguishing information at all,
-    leaving only a handful of characters of the actual first headline to
-    tell two totally different days apart. Skipping past that intro
-    before taking the window fixes that; single-story captions have no
-    such intro to skip, so this is a no-op for them.
+    Matching compares the FULL caption (after skipping a combined/digest
+    post's fixed boilerplate intro line - see match_body() below), not a
+    truncated prefix window. A previous version compared only the first
+    200 chars of post-intro text, which is enough to distinguish two
+    single-story posts but NOT two digest posts that happen to share the
+    same #1 headline (common when the top story hasn't changed between
+    two slots the same day) - the truncated window matched purely on
+    that shared top story and never got far enough into the caption to
+    see that the rest of the story list was completely different,
+    producing a false-positive match against an unrelated slot's post.
+    Comparing the whole body closes that hole: two posts only match now
+    if their entire story list (not just the first headline) is
+    identical.
+
+    `not_before`, if given, should be the unix timestamp of when THIS
+    publish attempt started (not just "now"). Without it, a match is
+    only bounded by lookback_seconds on both sides of "now" - which
+    means a genuinely different, unrelated post made a few minutes
+    BEFORE this attempt even started (e.g. the previous slot's post)
+    can still fall inside the window and match. Requiring the matched
+    post's timestamp to be >= not_before rules that out: nothing that
+    was already on the feed before this attempt began can be mistaken
+    for this attempt's result.
     """
     try:
         resp = requests.get(
@@ -273,31 +284,37 @@ def find_recent_matching_post(caption: str, account: str = "en", lookback_second
               f"treating the publish as failed")
         return None
 
-    def match_window(text: str) -> str:
+    def match_body(text: str) -> str:
         # Skip past a combined/digest post's fixed boilerplate intro
         # (everything up to and including the first "\n\n1. ") before
-        # taking the comparison window, so the window is made of
-        # genuinely story-specific text rather than mostly-identical
-        # template wording. Falls back to the raw start of the caption
-        # if no such intro is present (e.g. single-story posts).
+        # comparing, so the comparison is made of genuinely
+        # story-specific text rather than mostly-identical template
+        # wording. Falls back to the raw caption if no such intro is
+        # present (e.g. single-story posts). No length truncation -
+        # the full remaining caption must match, so two digest posts
+        # that only share their top headline (but differ further down
+        # the list) are correctly treated as different posts.
         skipped = re.sub(r"^.*?\n\n1\.\s*", "", text or "", count=1, flags=re.DOTALL)
-        return skipped[:caption_prefix_len] if skipped != text else (text or "")[:caption_prefix_len]
+        return skipped if skipped != text else (text or "")
 
-    target_window = match_window(caption)
+    target_body = match_body(caption)
     now = time.time()
 
     for item in resp.json().get("data", []):
-        item_window = match_window(item.get("caption") or "")
+        item_body = match_body(item.get("caption") or "")
         item_ts_str = item.get("timestamp")
-        if not item_ts_str or item_window != target_window:
+        if not item_ts_str or item_body != target_body:
             continue
         try:
             # Instagram timestamps look like "2026-08-03T18:07:41+0000"
             item_ts = time.mktime(time.strptime(item_ts_str[:19], "%Y-%m-%dT%H:%M:%S"))
         except ValueError:
             continue
-        if abs(now - item_ts) <= lookback_seconds:
-            return item["id"]
+        if now - item_ts > lookback_seconds:
+            continue
+        if not_before is not None and item_ts < not_before:
+            continue
+        return item["id"]
 
     return None
 
