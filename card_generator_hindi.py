@@ -733,6 +733,16 @@ def _draw_logo(canvas: Image.Image, pad_x: int, bottom_y: int, logo_size: int = 
     canvas.paste(logo, logo_pos, mask)
 
 
+def _breaking_badge_width(draw: ImageDraw.ImageDraw, label: str, font: ImageFont.FreeTypeFont) -> int:
+    """Measures how wide _draw_breaking_badge's pill will be for this
+    label/font, without drawing anything - lets a caller right-align the
+    badge (position it so its RIGHT edge lands at a fixed x) before the
+    actual draw call, since PIL has no built-in right-anchored drawing."""
+    bbox = draw.textbbox((0, 0), label, font=font)
+    w = bbox[2] - bbox[0]
+    return w + 16 * 2  # same `pad = 16` as _draw_breaking_badge
+
+
 def _draw_breaking_badge(draw: ImageDraw.ImageDraw, x: int, y: int, label: str, font: ImageFont.FreeTypeFont) -> list:
     """Draws a fixed red/white breaking-news pill with its top-left corner
     at (x, y). Returns the pill's bounding box [x0, y0, x1, y1] so the
@@ -863,13 +873,15 @@ def build_news_card(
         )
 
     # --- BREAKING badge, only for stories flagged as breaking news - sits
-    # to the left of the category pill, same row, fixed red/white so it
-    # never blends into the day's theme color ---
+    # in the top-RIGHT corner (fixed red/white so it never blends into
+    # the day's theme color), independent of the category pill which
+    # always starts at the top-left regardless of whether breaking is on ---
     tag_start_x = pad_x
     if breaking:
         breaking_font = _load_font(_font_path(font_family, "tag"), 30)
-        breaking_box = _draw_breaking_badge(draw, pad_x, pad_y, breaking_label, breaking_font)
-        tag_start_x = breaking_box[2] + 12  # small gap before the category pill
+        breaking_w = _breaking_badge_width(draw, breaking_label, breaking_font)
+        breaking_x = CANVAS_W - pad_x - breaking_w
+        _draw_breaking_badge(draw, breaking_x, pad_y, breaking_label, breaking_font)
 
     # --- tag pill (e.g. "समाचार", "तकनीक") - solid color pulled from this
     # batch's theme, so it matches the headline/logo instead of being a
@@ -1178,13 +1190,14 @@ def build_info_slide(
             label_text, font=label_font, fill=(255, 255, 255),
         )
 
-    # --- BREAKING badge, same rule as the hook slide: only for stories
-    # flagged as breaking, sits left of the category pill ---
+    # --- BREAKING badge, same rule as the hook slide: top-right corner,
+    # independent of the category pill (always top-left) ---
     tag_start_x = pad_x
     if breaking:
         breaking_font = _load_font(_font_path(font_family, "tag"), 26)
-        breaking_box = _draw_breaking_badge(draw, pad_x, pad_y, breaking_label, breaking_font)
-        tag_start_x = breaking_box[2] + 12
+        breaking_w = _breaking_badge_width(draw, breaking_label, breaking_font)
+        breaking_x = CANVAS_W - pad_x - breaking_w
+        _draw_breaking_badge(draw, breaking_x, pad_y, breaking_label, breaking_font)
 
     # --- tag pill, same theme-matched color as the hook slide, for visual continuity ---
     tag_text = _tag_label(tag)
