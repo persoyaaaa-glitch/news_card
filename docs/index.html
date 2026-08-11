@@ -4,6 +4,12 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#000000">
+<meta name="color-scheme" content="dark">
+<!-- Inline (not the external stylesheet) so the very first paint is
+     black instead of the browser/webview's default white or grey -
+     this is what was showing during the splash screen, in the gap
+     before style.css finishes loading. -->
+<style>html,body{background:#000000;margin:0;padding:0;}</style>
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Rundown">
@@ -11,6 +17,11 @@
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png">
 <link rel="apple-touch-icon" href="icon-192.png">
+<!-- iOS ignores the manifest's background_color for its own "Add to
+     Home Screen" launch splash screen - without this it defaults to a
+     plain white/grey screen no matter what the manifest says. No media
+     query = applies as the fallback splash for any iOS device size. -->
+<link rel="apple-touch-startup-image" href="splash-black.png">
 <link rel="stylesheet" href="style.css">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
