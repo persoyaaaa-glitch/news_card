@@ -735,36 +735,92 @@ DEFAULT_HASHTAGS_HI = ["#IndiaNews", "#HindiNews", "#आजकीखबर", "#T
                         "#DailyNews", "#WorldNews", "#NewsUpdate", "#CurrentAffairs", "#NewsToday"]
 
 
-def _fit_caption(intro: str, story_blocks: list, hashtags: list) -> str:
+def _fit_caption(intro: str, story_parts: list, hashtags: list) -> str:
     """
     Assembles intro + numbered story blocks + hashtags into one caption
-    string, in the EXACT order story_blocks is given - never reorders,
+    string, in the EXACT order story_parts is given - never reorders,
     so whatever order the caller's list is in (priority order, or a
     reviewer's reordering) is the order that ends up on Instagram.
 
-    If the assembled text would exceed IG_CAPTION_CHAR_LIMIT, drops the
-    LAST (lowest-priority) story block and retries - hashtags and the
-    intro line always survive since they're what makes the post
-    findable/on-brand. If it's still too long with only one story left,
-    trims that story's own text (rather than silently exceeding the
-    limit or dropping the only story).
+    story_parts is a list of {"title", "body", "source"} dicts (not
+    pre-joined strings) so that if the assembled caption would exceed
+    IG_CAPTION_CHAR_LIMIT, we can shrink it by TRIMMING each story's
+    paragraph down to a fair share of the remaining space, rather than
+    deleting whole stories. Every story posted always keeps its
+    headline and at least a shortened write-up - a "top 5 stories"
+    post should never silently turn into a "top 2 stories" post just
+    because the paragraphs ran long.
+
+    Bodies that are already shorter than their fair share keep their
+    full text, and the unused space is handed to the longer bodies
+    (processed shortest-first) so the limited budget is used well
+    instead of every story getting an identical, wastefully small cap.
+
+    Only if even bare titles/sources (no bodies at all) don't fit under
+    the limit - astronomically unlikely at normal story counts - do we
+    fall back to dropping the lowest-priority story block entirely.
     """
     hashtag_line = " ".join(hashtags)
-    remaining = list(story_blocks)
-    while remaining:
+
+    def build(parts: list) -> str:
         lines = [intro, ""]
-        for i, block in enumerate(remaining, start=1):
+        for i, p in enumerate(parts, start=1):
+            block = f"{p['title']} — {p['body']}" if p["body"] else p["title"]
+            block += f" (Source: {p['source']})"
             lines.append(f"{i}. {block}")
             lines.append("")
-        caption = "\n".join(lines).rstrip("\n") + "\n\n" + hashtag_line
-        if len(caption) <= IG_CAPTION_CHAR_LIMIT:
-            return caption
-        if len(remaining) == 1:
-            overflow = len(caption) - IG_CAPTION_CHAR_LIMIT
-            trimmed = remaining[0][: max(0, len(remaining[0]) - overflow - 1)].rstrip() + "…"
-            return "\n".join([intro, "", f"1. {trimmed}"]) + "\n\n" + hashtag_line
-        remaining = remaining[:-1]  # drop the lowest-priority story and retry
-    return (intro + "\n\n" + hashtag_line)[:IG_CAPTION_CHAR_LIMIT]
+        return "\n".join(lines).rstrip("\n") + "\n\n" + hashtag_line
+
+    caption = build(story_parts)
+    if len(caption) <= IG_CAPTION_CHAR_LIMIT:
+        return caption
+
+    # Over the limit - figure out how much space is left for bodies once
+    # titles/sources/numbering/intro/hashtags (the "overhead") are paid for.
+    # Every story is assumed to end up with a non-empty (if shortened)
+    # body, which costs an extra " — " separator each vs. the bare title
+    # - so that has to be reserved too, or the final caption can come out
+    # a few characters over the limit.
+    separator = " — "
+    bare_parts = [{**p, "body": ""} for p in story_parts]
+    overhead = len(build(bare_parts))
+    n = len(story_parts)
+    available = IG_CAPTION_CHAR_LIMIT - overhead - (n * len(separator))
+
+    if available <= 0 or n == 0:
+        # Bare titles alone don't fit - fall back to dropping stories
+        # from the end (old behavior) as a last resort.
+        remaining = list(story_parts)
+        while remaining:
+            trial = build(remaining)
+            if len(trial) <= IG_CAPTION_CHAR_LIMIT:
+                return trial
+            if len(remaining) == 1:
+                break
+            remaining = remaining[:-1]
+        return (intro + "\n\n" + hashtag_line)[:IG_CAPTION_CHAR_LIMIT]
+
+    # Distribute `available` characters of body text across all n stories,
+    # shortest-body-first, so short paragraphs keep their full text and
+    # the space they don't use gets passed on to the longer ones.
+    order = sorted(range(n), key=lambda i: len(story_parts[i]["body"]))
+    trimmed_bodies = [None] * n
+    remaining_budget = available
+    remaining_n = n
+    for idx in order:
+        body = story_parts[idx]["body"]
+        share = remaining_budget // remaining_n if remaining_n else 0
+        if len(body) <= share:
+            trimmed_bodies[idx] = body
+            remaining_budget -= len(body)
+        else:
+            keep = max(0, share - 1)  # leave room for the "…"
+            trimmed_bodies[idx] = (body[:keep].rstrip() + "…") if keep > 0 else ""
+            remaining_budget -= share
+        remaining_n -= 1
+
+    trimmed_parts = [{**p, "body": trimmed_bodies[i]} for i, p in enumerate(story_parts)]
+    return build(trimmed_parts)
 
 
 def build_combined_caption(results: list) -> str:
@@ -780,18 +836,22 @@ def build_combined_caption(results: list) -> str:
     No AI call happens here - every story's paragraph was already
     generated once when its candidate was built (_build_post /
     build_candidates), so this is just formatting + fitting Instagram's
-    caption length cap (see _fit_caption). Falls back to detail_text,
-    then just the bare headline, for any one story that's missing a
-    caption_paragraph (e.g. AI generation failed for that story only).
+    caption length cap (see _fit_caption, which trims each story's
+    paragraph to fit rather than dropping stories). Falls back to
+    detail_text, then just the bare headline, for any one story that's
+    missing a caption_paragraph (e.g. AI generation failed for that
+    story only).
     """
     intro = f"Today's top {len(results)} stories - here's what's happening:"
-    blocks = []
-    for r in results:
-        body = r.get("caption_paragraph") or r.get("detail_text") or ""
-        block = f"{r['title']} — {body}" if body else r["title"]
-        block += f" (Source: {r['source']})"
-        blocks.append(block)
-    return _fit_caption(intro, blocks, DEFAULT_HASHTAGS_EN)
+    parts = [
+        {
+            "title": r["title"],
+            "body": r.get("caption_paragraph") or r.get("detail_text") or "",
+            "source": r["source"],
+        }
+        for r in results
+    ]
+    return _fit_caption(intro, parts, DEFAULT_HASHTAGS_EN)
 
 
 def build_combined_caption_hindi(results: list) -> str:
@@ -806,14 +866,15 @@ def build_combined_caption_hindi(results: list) -> str:
     English side above.
     """
     intro = f"आज की {len(results)} बड़ी खबरें:"
-    blocks = []
-    for r in results:
-        headline = r.get("headline_hi") or r["title"]
-        body = r.get("caption_paragraph_hi") or r.get("detail_hi") or ""
-        block = f"{headline} — {body}" if body else headline
-        block += f" (Source: {r['source']})"
-        blocks.append(block)
-    return _fit_caption(intro, blocks, DEFAULT_HASHTAGS_HI)
+    parts = [
+        {
+            "title": r.get("headline_hi") or r["title"],
+            "body": r.get("caption_paragraph_hi") or r.get("detail_hi") or "",
+            "source": r["source"],
+        }
+        for r in results
+    ]
+    return _fit_caption(intro, parts, DEFAULT_HASHTAGS_HI)
 
 
 def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: int = 80,

@@ -49,6 +49,9 @@ jobs:
           python-version: "3.11"
           cache: "pip"
 
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
       - name: Build content for this slot first, if it isn't built yet
         # Best-effort - if this step fails, or the slot already has
         # content, post_now() below still works fine: for a slot with

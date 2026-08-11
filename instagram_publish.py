@@ -222,7 +222,9 @@ def post_carousel_to_instagram(image_urls: list, caption: str, account: str = "e
     return publish_container(carousel_id, account=account)
 
 
-def find_recent_matching_post(caption: str, account: str = "en", lookback_seconds: int = 600, caption_prefix_len: int = 60) -> str | None:
+import re
+
+def find_recent_matching_post(caption: str, account: str = "en", lookback_seconds: int = 600, caption_prefix_len: int = 200) -> str | None:
     """
     Meta's Graph API occasionally returns an error (e.g. the "action is
     blocked" / "Application request limit reached" spam-review response)
@@ -236,10 +238,24 @@ def find_recent_matching_post(caption: str, account: str = "en", lookback_second
 
     Call this right after a publish call raises, BEFORE deciding the post
     truly failed. It checks the account's most recent media for one whose
-    caption prefix matches (captions are AI-generated and effectively
-    unique per post) and whose timestamp is within lookback_seconds of
-    now. Returns that post's media ID if found, else None (meaning it's
-    safe to conclude the publish really did fail).
+    caption matches (in the sense below) and whose timestamp is within
+    lookback_seconds of now. Returns that post's media ID if found, else
+    None (meaning it's safe to conclude the publish really did fail).
+
+    Matching is done on a WINDOW of the caption, not the raw first
+    caption_prefix_len characters - for single-story posts (whole
+    caption is Gemini-written, effectively unique from character one)
+    that's the same thing, but combined/digest posts always start with
+    an identical templated intro line ("Today's top 5 stories - here's
+    what's happening:" / "आज की 5 बड़ी खबरें:") followed by "1. " before
+    any story-specific text begins. That boilerplate is IDENTICAL across
+    every digest post ever made, on any day, so comparing raw prefixes
+    against it - with a 60-char window as this used to do - meant most
+    of the compared text carried no distinguishing information at all,
+    leaving only a handful of characters of the actual first headline to
+    tell two totally different days apart. Skipping past that intro
+    before taking the window fixes that; single-story captions have no
+    such intro to skip, so this is a no-op for them.
     """
     try:
         resp = requests.get(
@@ -257,13 +273,23 @@ def find_recent_matching_post(caption: str, account: str = "en", lookback_second
               f"treating the publish as failed")
         return None
 
-    target_prefix = (caption or "")[:caption_prefix_len]
+    def match_window(text: str) -> str:
+        # Skip past a combined/digest post's fixed boilerplate intro
+        # (everything up to and including the first "\n\n1. ") before
+        # taking the comparison window, so the window is made of
+        # genuinely story-specific text rather than mostly-identical
+        # template wording. Falls back to the raw start of the caption
+        # if no such intro is present (e.g. single-story posts).
+        skipped = re.sub(r"^.*?\n\n1\.\s*", "", text or "", count=1, flags=re.DOTALL)
+        return skipped[:caption_prefix_len] if skipped != text else (text or "")[:caption_prefix_len]
+
+    target_window = match_window(caption)
     now = time.time()
 
     for item in resp.json().get("data", []):
-        item_caption = (item.get("caption") or "")[:caption_prefix_len]
+        item_window = match_window(item.get("caption") or "")
         item_ts_str = item.get("timestamp")
-        if not item_ts_str or item_caption != target_prefix:
+        if not item_ts_str or item_window != target_window:
             continue
         try:
             # Instagram timestamps look like "2026-08-03T18:07:41+0000"
