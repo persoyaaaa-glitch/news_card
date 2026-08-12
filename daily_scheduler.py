@@ -96,8 +96,8 @@ def today_ist() -> date:
     return now_ist().date()
 
 
-MIN_POSTS_PER_DAY = 3
-MAX_POSTS_PER_DAY = 5
+MIN_POSTS_PER_DAY = 12
+MAX_POSTS_PER_DAY = 18
 
 # Hard ceiling on how many posts a day can be bumped up to via the PWA's
 # schedule editor, applied server-side regardless of what the PWA sends -
@@ -108,7 +108,7 @@ MAX_TARGET_POSTS = 25
 # Each "post" now bundles this many distinct stories into ONE combined
 # carousel (see hourly_run.run_combined) instead of one story per post -
 # so MIN/MAX_POSTS_PER_DAY x STORIES_PER_POST is the real daily story
-# throughput (e.g. 13-23 posts x 5 stories = 65-115 stories/day). This is
+# throughput (e.g. 12-18 posts x 5 stories = 60-90 stories/day). This is
 # per language - the same 5 stories are reused for both the en and hi
 # carousels of a given slot, just posted at (usually) different times.
 STORIES_PER_POST = 5
@@ -141,17 +141,23 @@ POLL_SECONDS = 30
 
 # Windows (24h local time) when engagement tends to be highest, each with
 # a relative weight controlling how much of the day's post budget lands
-# there. These are general, widely-cited social engagement patterns, not
-# an exact science - the point is "mostly during active hours, never all
-# bunched at 3am," not minute-perfect optimization. Used independently
-# for both the en and hi time draws.
+# there. Covers the full 24 hours with no dead zones - the lower-weight
+# windows below (overnight, mid-morning, afternoon) exist so posts CAN
+# land at any hour, just less often than the peak windows. Weights are
+# general, widely-cited social engagement patterns, not an exact
+# science - the point is "mostly during active hours, with some spread
+# the rest of the day," not minute-perfect optimization. Used
+# independently for both the en and hi time draws.
 PEAK_WINDOWS = [
     # (start_hour, start_min, end_hour, end_min, weight)
-    (7, 0, 9, 30, 3),      # morning commute / breakfast scrolling
-    (12, 0, 14, 0, 2),     # lunch break
-    (17, 0, 19, 0, 3),     # evening commute
-    (19, 0, 22, 30, 5),    # prime time - dinner through late evening, highest weight
-    (22, 30, 23, 45, 1),   # late-night scrollers, light coverage
+    (0, 0, 7, 0, 1),        # overnight / early morning - light but non-zero
+    (7, 0, 9, 30, 3),       # morning commute / breakfast scrolling
+    (9, 30, 12, 0, 1.5),    # mid-morning
+    (12, 0, 14, 0, 2),      # lunch break
+    (14, 0, 17, 0, 1.5),    # afternoon
+    (17, 0, 19, 0, 3),      # evening commute
+    (19, 0, 22, 30, 5),     # prime time - dinner through late evening, highest weight
+    (22, 30, 23, 59, 1),    # late-night scrollers, light coverage
 ]
 
 

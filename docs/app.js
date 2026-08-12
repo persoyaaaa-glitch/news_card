@@ -1,46 +1,52 @@
-const IST_OFFSET_MIN = 5.5 * 60;
-
 // Must match STORIES_PER_POST in daily_scheduler.py - also enforced
 // server-side by save-slot-selection, this is just so the UI can cap
 // selection and grey out "add" before hitting that 400.
 const MAX_SELECTED_STORIES = 5;
 
-function nowIST() {
-  const now = new Date();
-  const utcMs = now.getTime() + now.getTimezoneOffset() * 60000;
-  return new Date(utcMs + IST_OFFSET_MIN * 60000);
-}
+// All the date/time helpers below take REAL absolute Date objects (the
+// device's actual current time, or a slot's planned time parsed from
+// the server's tz-aware "+05:30" ISO string - see plannedTimeOf()) and
+// format/derive them using the IANA "Asia/Kolkata" zone, rather than
+// constructing an artificially IST-shifted epoch. That epoch-shifting
+// approach (add/subtract getTimezoneOffset(), then read back via UTC
+// methods) is a well-known footgun: it only produces correct digits
+// through ONE specific read path (UTC-formatting methods), so mixing
+// it with any local-zone method, or with a genuinely tz-aware Date
+// (like plannedTimeOf()'s), silently reintroduces an offset error. Not
+// worth the risk when every supported browser/webview here already has
+// a real timezone database - just ask for "Asia/Kolkata" directly.
 
-// "YYYY-MM-DD" for an IST-shifted Date (e.g. from nowIST()) - matches
-// the date strings daily_scheduler.py uses as slots_key() suffixes, so
-// the client can compute which per-date keys to ask Supabase for
-// without needing a round trip just to find out what "today" is.
-function isoDateStrIST(d) {
-  return d.toISOString().slice(0, 10);
-}
-
+// "YYYY-MM-DD" in IST for the current moment - matches the date strings
+// daily_scheduler.py uses as slots_key() suffixes (en-CA gives
+// YYYY-MM-DD formatting), so the client can compute which per-date keys
+// to ask Supabase for without needing a round trip just to find out
+// what "today" is.
 function todayStrIST() {
-  return isoDateStrIST(nowIST());
+  return new Date().toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
 }
 
 // [today, yesterday, ...] date strings, oldest last - matches the
-// order daily_slots rows are shown/swiped through in the app.
+// order daily_slots rows are shown/swiped through in the app. Anchored
+// on todayStrIST() (parsed as UTC midnight, so plain UTC-date stepping
+// is safe - IST has no DST to worry about) rather than doing repeated
+// zone conversions.
 function recentDateStrsIST(count) {
   const out = [];
-  const d = nowIST();
+  const start = new Date(`${todayStrIST()}T00:00:00Z`);
   for (let i = 0; i < count; i++) {
-    out.push(isoDateStrIST(d));
-    d.setDate(d.getDate() - 1);
+    const d = new Date(start);
+    d.setUTCDate(d.getUTCDate() - i);
+    out.push(d.toISOString().slice(0, 10));
   }
   return out;
 }
 
 function fmtTime(d) {
-  return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit" });
+  return d.toLocaleTimeString("en-GB", { hour: "2-digit", minute: "2-digit", timeZone: "Asia/Kolkata" });
 }
 
 function fmtDate(d) {
-  return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long" });
+  return d.toLocaleDateString("en-GB", { weekday: "long", day: "numeric", month: "long", timeZone: "Asia/Kolkata" });
 }
 
 // ---- Accounts (home screen) ----
@@ -338,7 +344,7 @@ function showHomeScreen() {
 // so from the picker alone you can see which account needs attention
 // first without opening it.
 function nextUpcomingTime(data, lang) {
-  const now = nowIST();
+  const now = new Date(); // real absolute time - compared against plannedTimeOf(), which is also real (parsed from a +05:30 ISO string)
   let soonest = null;
   (data.slots || []).forEach((s) => {
     const posted = lang === "hi" ? s.posted_hi : s.posted;
@@ -446,7 +452,7 @@ const postingSlotIndices = new Set();
 // retrying) now shows as "overdue" instead of being falsely marked
 // "past"/posted.
 function statusOf(slot, allSorted, index, lang) {
-  const now = nowIST();
+  const now = new Date(); // real absolute time - see nextUpcomingTime()
   const planned = plannedTimeOf(slot, lang);
   const isPosted = lang === "hi" ? slot.posted_hi : slot.posted;
   if (isPosted) return "past";
@@ -487,7 +493,6 @@ function render(data, manualIndices) {
   }
   empty.hidden = true;
 
-  const now = nowIST();
   const pastCount = slots.filter((s) => (lang === "hi" ? s.posted_hi : s.posted)).length;
   updateProgress(pastCount, slots.length);
 
@@ -752,7 +757,7 @@ function escapeHtml(str) {
 }
 
 function tickClock() {
-  document.getElementById("clock").textContent = fmtTime(nowIST());
+  document.getElementById("clock").textContent = fmtTime(new Date());
 }
 
 // ---- Modal ----
