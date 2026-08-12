@@ -2,7 +2,7 @@
 card_generator.py
 Takes a downloaded news photo + headline/source text and composites a
 clean, consistent "news card" image (1080x1350, Instagram portrait ratio).
-Pure Pillow — no AI involved, so it's deterministic and never garbles text.
+Pure Pillow â€” no AI involved, so it's deterministic and never garbles text.
 """
 import colorsys
 import os as _os
@@ -106,6 +106,16 @@ def _pill_colors_from_theme(theme: dict) -> tuple:
 def _hex_to_rgb(hex_color: str) -> tuple:
     hex_color = hex_color.lstrip("#")
     return tuple(int(hex_color[i:i + 2], 16) for i in (0, 2, 4))
+
+
+# The default English fonts (Oblata, Runtime) have no rupee-sign glyph -
+# PIL silently draws an empty box (.notdef) instead of erroring, so a
+# missing rupee sign is easy to miss visually. Swap it for "Rs. "
+# everywhere text is drawn rather than switching fonts.
+def _sanitize_currency_symbols(text: str) -> str:
+    if not text:
+        return text
+    return text.replace("\u20b9", "Rs. ")
 
 
 def _photo_accent_color(img: Image.Image) -> str:
@@ -289,7 +299,7 @@ def _autofit_text(draw, text: str, font_path: str, max_width: int, max_height: i
     max_lines = max(1, max_height // line_h)
     if len(lines) > max_lines:
         lines = lines[:max_lines]
-        lines[-1] = lines[-1].rstrip() + "…"
+        lines[-1] = lines[-1].rstrip() + "â€¦"
     return font, lines, line_h
 
 
@@ -336,7 +346,7 @@ def generate_gradient_background(width: int, height: int, tag: str = "NEWS") -> 
 
 
 def _make_linear_gradient(width: int, height: int, hex_stops: list) -> Image.Image:
-    """Vertical (180°) multi-stop linear gradient image, width x height."""
+    """Vertical (180Â°) multi-stop linear gradient image, width x height."""
     stops = [_hex_to_rgb(h) for h in hex_stops]
     n = len(stops) - 1
     img = Image.new("RGB", (1, height))
@@ -661,6 +671,9 @@ def build_news_card(
     highlight: str = None,
 ):
     theme = theme or random.choice(HEADLINE_THEMES)
+    headline = _sanitize_currency_symbols(headline)
+    source = _sanitize_currency_symbols(source)
+    tag = _sanitize_currency_symbols(tag)
     # Hook headline font: defaults to the same font as the description slide
     # (FONT_BODY / Playfair) unless the caller pins a specific one, or passes
     # "random" to get the old per-card random pick from FONT_HEADLINE_CHOICES.
@@ -934,6 +947,8 @@ def build_info_slide(
     category's default duotone color, e.g. ("#000000", "#ffffff") for a
     true black-and-white treatment instead of a category-colored tint.
     """
+    body_text = _sanitize_currency_symbols(body_text)
+    tag = _sanitize_currency_symbols(tag)
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
     theme = theme or random.choice(HEADLINE_THEMES)
 
