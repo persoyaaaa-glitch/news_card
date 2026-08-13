@@ -45,6 +45,7 @@ import traceback
 from datetime import datetime, timedelta, date, timezone
 
 import hourly_run
+from token_refresh import ensure_token_fresh, ensure_all_tokens_fresh
 from supabase_client import (
     get_state,
     save_state,
@@ -997,6 +998,15 @@ def post_now(slot_index: int, lang: str) -> bool:
     state = _load_state_remote()
     state = _ensure_today_schedule_remote(state)
 
+    # Same reasoning as in check_once() - make sure this specific
+    # account's token isn't the reason a manual "Post now" tap fails too.
+    try:
+        ensure_token_fresh(account=lang)
+    except Exception as e:
+        print(f"Post now: token refresh check failed for account='{lang}', proceeding with "
+              f"whatever token is currently set: {e}")
+        traceback.print_exc()
+
     try:
         _reconcile_skeleton_sync(state)
     except Exception as e:
@@ -1078,6 +1088,26 @@ def check_once():
               f"from Supabase - aborting this run cleanly, will retry next check: {e}")
         traceback.print_exc()
         return
+
+    # Refresh (or establish) both accounts' tokens BEFORE any posting is
+    # attempted below. _publish_prebuilt_slot() calls instagram_publish.py
+    # directly and never triggers a refresh itself - previously the only
+    # code path that ever called ensure_token_fresh() was the rare
+    # "content wasn't pre-built, build it fresh" fallback inside
+    # _attempt_fire_slot(), which normally never runs since
+    # content_pregen.py has already pre-built the slot by the time it's
+    # due. In practice that meant neither account's token was ever
+    # refreshed by the everyday 30-min tick, so posting silently broke
+    # (every attempt, for the whole account) once whichever token hit
+    # its ~60-day expiry first. A failed refresh here is non-fatal - it
+    # just means today's tick proceeds with whatever token is already in
+    # the environment, same as before this call existed.
+    try:
+        ensure_all_tokens_fresh()
+    except Exception as e:
+        print(f"[{now_ist().isoformat()}] Token refresh check failed - proceeding with "
+              f"whatever token is currently set for each account: {e}")
+        traceback.print_exc()
 
     try:
         _reconcile_skeleton_sync(state)
