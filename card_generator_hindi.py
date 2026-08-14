@@ -1240,6 +1240,129 @@ def build_info_slide(
     return out_path
 
 
+def _draw_tracked_center_text(draw, text: str, font: ImageFont.FreeTypeFont, cx: float, y: float,
+                               fill, tracking: int = 0, shadow: tuple = None):
+    """Mirrors card_generator.py's helper of the same name. Per-glyph
+    tracking is only ever used here for the LATIN brand name (e.g.
+    "TIMELY SAMACHAR") - never pass tracking>0 for Devanagari text, since
+    splitting a shaped Devanagari string into individual code points
+    would break conjunct/matra shaping. Devanagari headline/subheading
+    text always goes through the tracking=0 branch, which draws the
+    whole string in one call so RAQM shapes it correctly."""
+    if not tracking:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        x = cx - (bbox[2] - bbox[0]) / 2 - bbox[0]
+        if shadow:
+            draw.text((x + shadow[0], y + shadow[1]), text, font=font, fill=shadow[2])
+        draw.text((x, y), text, font=font, fill=fill)
+        return
+    total_w = sum(draw.textlength(ch, font=font) for ch in text) + tracking * max(0, len(text) - 1)
+    x = cx - total_w / 2
+    for ch in text:
+        w = draw.textlength(ch, font=font)
+        if shadow:
+            draw.text((x + shadow[0], y + shadow[1]), ch, font=font, fill=shadow[2])
+        draw.text((x, y), ch, font=font, fill=fill)
+        x += w + tracking
+
+
+def build_ultimate_hook_slide(
+    photo_paths: list,
+    out_path: str,
+    theme: dict = None,
+    font_family: str = DEFAULT_FONT_FAMILY,
+    brand_name: str = "TIMELY SAMACHAR",
+    headline: str = "हर बड़ी खबर",
+    subheading: str = None,
+    story_count: int = None,
+) -> str:
+    """
+    Hindi mirror of card_generator.build_ultimate_hook_slide. Builds the
+    carousel's very FIRST slide: a 2x2 collage of this batch's own story
+    hook photos, so a viewer gets a preview of everything in the Hindi
+    carousel before swiping.
+
+    brand_name stays in LATIN script ("TIMELY SAMACHAR") even on the
+    Hindi page by design - this is the page's brand mark, not body copy,
+    so it's drawn with tracking like the English version rather than
+    through the Devanagari shaping path.
+
+    headline/subheading are Devanagari by default ("हर बड़ी खबर" /
+    "{n} कहानियां, एक स्वाइप दूर") and always render through the
+    RAQM-backed _load_font/_draw_tracked_center_text(tracking=0) path so
+    conjuncts and matras shape correctly.
+
+    theme is accepted for call-site symmetry with the English version
+    but the corner logo ALWAYS comes from HINDI_LOGO_PATH, never
+    theme["logo"] - same rule as every other slide in this file (see
+    file docstring / build_news_card).
+    """
+    n = story_count or min(len(photo_paths), 4) or 4
+    subheading = subheading or f"{n} कहानियां, एक स्वाइप दूर"
+
+    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
+
+    # --- 2x2 collage of this batch's own story photos ---
+    cols, rows = 2, 2
+    tile_w, tile_h = CANVAS_W // cols, CANVAS_H // rows
+    usable_photos = [p for p in (photo_paths or []) if p and _os.path.exists(p)]
+    for i in range(4):
+        photo = None
+        if usable_photos:
+            src = usable_photos[i % len(usable_photos)]
+            try:
+                photo = Image.open(src).convert("RGB")
+                photo = crop_to_fill(photo, tile_w + 2, tile_h + 2)
+            except Exception:
+                photo = None
+        if photo is None:
+            photo = generate_gradient_background(tile_w + 2, tile_h + 2, tag="NEWS")
+        r, c = divmod(i, cols)
+        canvas.paste(photo, (c * tile_w, r * tile_h))
+
+    draw = ImageDraw.Draw(canvas)
+    draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
+    draw.line([(0, tile_h), (CANVAS_W, tile_h)], fill=BG_COLOR, width=3)
+
+    # --- scrim: background images sit at ~90% opacity, same as the
+    # English version, so the collage stays vivid while text stays legible ---
+    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 26))
+    canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
+    draw = ImageDraw.Draw(canvas, "RGBA")
+
+    pad_x = 40
+    white = (255, 255, 255, 255)
+
+    # --- brand name, top, bright, tracked Latin small caps + hairline rule ---
+    eyebrow_font = _load_font(_font_path(font_family, "tag"), 34)
+    _draw_tracked_center_text(draw, brand_name.upper(), eyebrow_font, CANVAS_W / 2, 55, white, tracking=7)
+    draw.line([(90, 120), (CANVAS_W - 90, 120)], fill=(255, 255, 255, 190), width=1)
+
+    # --- headline, centered vertically, bright with a soft shadow, Devanagari-safe (no tracking) ---
+    headline_font, wrapped, line_h = _autofit_text(
+        draw, headline, _font_path(font_family, "headline"), CANVAS_W - 2 * pad_x, 260,
+        max_size=100, min_size=48, line_spacing_extra=10, side_margin=24,
+    )
+    block_h = line_h * len(wrapped)
+    text_y = (CANVAS_H - block_h) // 2
+    for line in wrapped:
+        _draw_tracked_center_text(draw, line, headline_font, CANVAS_W / 2, text_y, white,
+                                   shadow=(0, 3, (0, 0, 0, 150)))
+        text_y += line_h
+
+    # --- subheading, bottom, bright, Devanagari-safe (no tracking) ---
+    sub_font = _load_font(_font_path(font_family, "meta"), 36)
+    _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, CANVAS_H - 95, white)
+
+    canvas = canvas.convert("RGB")
+    # Always this page's own logo - never theme["logo"] - see file docstring.
+    if _os.path.exists(HINDI_LOGO_PATH):
+        _draw_logo(canvas, pad_x, CANVAS_H - 40, logo_size=100, logo_path=HINDI_LOGO_PATH)
+
+    canvas.save(out_path, "JPEG", quality=92)
+    return out_path
+
+
 def build_carousel(
     photo_path: str,
     headline: str,

@@ -39,7 +39,7 @@ load_dotenv()  # must run before importing supabase_client/instagram_publish, wh
 from news_source import fetch_best_and_breaking_news
 from image_fetch import get_article_image_from_resolved_url, resolve_article_url
 from article_extract import get_carousel_slide_texts, extract_article_paragraphs
-from card_generator import build_carousel, HEADLINE_THEMES
+from card_generator import build_carousel, build_ultimate_hook_slide, HEADLINE_THEMES
 import card_generator_hindi
 
 # Hindi is golden-only: unlike the English page (which rotates through
@@ -352,6 +352,7 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
         "is_sensitive": sensitive,
         "priority_rank": priority_rank,
         "tag": tag,
+        "photo_path": img_path,  # raw source photo for THIS story's own hook slide (None for a generated-bg story) - reused as-is for the ultimate-hook collage tile, no re-fetch/re-slug needed
         "slide_paths": slide_paths,
         "caption": caption,
         "detail_text": detail_text,
@@ -877,26 +878,43 @@ def build_combined_caption_hindi(results: list) -> str:
     return _fit_caption(intro, parts, DEFAULT_HASHTAGS_HI)
 
 
-def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: int = 80,
+FOLLOW_END_SLIDE_EN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "follow_end_en.jpg")
+FOLLOW_END_SLIDE_HI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "follow_end_hi.jpg")
+
+
+def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: int = 80,
                   apply_jitter: bool = True, dry_run: bool = False, include_global: bool = True,
                   publish: bool = True) -> dict:
     """
     Posts `story_count` distinct stories bundled into ONE Instagram
-    carousel post (default: 5 stories x 2 images each = 10 images,
-    exactly Instagram's per-carousel cap), instead of run_multiple()'s
-    behavior of one separate post per story. Walks candidates in
-    priority order same as run_multiple, so slide 1-2 are the #1 story,
-    slides 3-4 are #2, etc.
+    carousel post (default: 4 stories x 2 images each = 8 story slides,
+    PLUS a fixed ultimate-hook collage slide at the very front and a
+    fixed "follow for more" end-card slide at the very back = 10 images
+    total, exactly Instagram's per-carousel cap), instead of
+    run_multiple()'s behavior of one separate post per story. Walks
+    candidates in priority order same as run_multiple, so slide 2-3 are
+    the #1 story, slides 4-5 are #2, etc. (slide 1 is always the
+    ultimate-hook collage, slide 10 is always the follow-for-more card).
+
+    Slide 1 - the "ultimate hook" - is a 2x2 collage built from these
+    same `story_count` stories' own hook photos (see
+    card_generator.build_ultimate_hook_slide), so a viewer sees a
+    preview of everything in the carousel before swiping past the first
+    story, instead of only seeing story #1's own hook slide. Slide 10 -
+    the "follow for more" end card - is a fixed, pre-designed static
+    asset (FOLLOW_END_SLIDE_EN / _HI, not regenerated per post) that
+    always closes out the carousel. Both are automatic and unconditional
+    - every combined post gets exactly one of each, front and back.
 
     How often this actually fires (once an hour, every 30 min, ...) is
     entirely up to the cron/scheduler calling this function - this
     function itself just builds and posts one combined batch per call.
 
     images_per_story caps each story's own slide count so the combined
-    total stays predictable (story_count * images_per_story). If a
-    story naturally yields fewer slides (e.g. no usable detail text,
-    just the hook), that story simply contributes fewer images - the
-    total can come in under the target, never over.
+    total stays predictable (2 fixed slides + story_count *
+    images_per_story). If a story naturally yields fewer slides (e.g.
+    no usable detail text, just the hook), that story simply contributes
+    fewer images - the total can come in under the target, never over.
 
     Only ONE caption is generated for the whole post (see
     build_combined_caption) - not one per story.
@@ -991,11 +1009,29 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
     # non-sensitive group is otherwise preserved (still priority order).
     results.sort(key=lambda r: not r.get("is_sensitive", False))
 
-    all_slide_paths = [p for r in results for p in r["slide_paths"]]
+    # --- ultimate-hook collage: slide 1, built from THESE stories' own
+    # hook photos (a story with a generated background instead of a real
+    # photo simply falls back to a gradient tile in that grid position -
+    # see build_ultimate_hook_slide) ---
+    hook_theme = theme
+    ultimate_hook_path = os.path.join(CARD_DIR, f"ultimate_hook_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+    build_ultimate_hook_slide(
+        photo_paths=[r.get("photo_path") for r in results],
+        out_path=ultimate_hook_path,
+        theme=hook_theme,
+        story_count=len(results),
+    )
+
+    all_story_slide_paths = [p for r in results for p in r["slide_paths"]]
+    all_slide_paths = [ultimate_hook_path] + all_story_slide_paths + [FOLLOW_END_SLIDE_EN]
     if len(all_slide_paths) > 10:
         print(f"  -> {len(all_slide_paths)} images would exceed Instagram's 10-item carousel "
-              f"cap, trimming lowest-priority story slides to fit")
-        all_slide_paths = all_slide_paths[:10]
+              f"cap, trimming lowest-priority story slides to fit (the ultimate-hook slide and "
+              f"follow-for-more end card are never trimmed)")
+        # Keep slide 1 (hook) and the last slide (follow-for-more) fixed;
+        # trim from the end of the story slides only.
+        budget = 10 - 2
+        all_slide_paths = [ultimate_hook_path] + all_story_slide_paths[:budget] + [FOLLOW_END_SLIDE_EN]
 
     caption = build_combined_caption(results)
 
@@ -1016,10 +1052,26 @@ def run_combined(story_count: int = 5, images_per_story: int = 2, max_attempts: 
             r["headline_hi"] = hi["headline_hi"]
             r["caption_paragraph_hi"] = hi.get("caption_paragraph_hi") or ""
             hi_results.append(r)
-        all_slide_paths_hi = [p for r in hi_results for p in r["slide_paths_hi"]]
-        if len(all_slide_paths_hi) > 10:
-            all_slide_paths_hi = all_slide_paths_hi[:10]
-        if all_slide_paths_hi:
+
+        if hi_results:
+            # Same collage idea as the English hook slide, but Hindi text
+            # (see card_generator_hindi.build_ultimate_hook_slide) - and
+            # reuses each story's ALREADY-fetched photo_path (same photo
+            # the English hook slide used for that story), not a fresh
+            # fetch, so the two language collages show the same images.
+            ultimate_hook_path_hi = os.path.join(
+                CARD_DIR, f"ultimate_hook_hi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            )
+            card_generator_hindi.build_ultimate_hook_slide(
+                photo_paths=[r.get("photo_path") for r in hi_results],
+                out_path=ultimate_hook_path_hi,
+                story_count=len(hi_results),
+            )
+            all_story_slide_paths_hi = [p for r in hi_results for p in r["slide_paths_hi"]]
+            all_slide_paths_hi = [ultimate_hook_path_hi] + all_story_slide_paths_hi + [FOLLOW_END_SLIDE_HI]
+            if len(all_slide_paths_hi) > 10:
+                budget = 10 - 2
+                all_slide_paths_hi = [ultimate_hook_path_hi] + all_story_slide_paths_hi[:budget] + [FOLLOW_END_SLIDE_HI]
             caption_hi = build_combined_caption_hindi(hi_results)
         else:
             print("  -> [hi] no stories translated successfully - skipping the Hindi post entirely this run")
@@ -1340,4 +1392,4 @@ def run_hindi_test(max_attempts: int = 30, dry_run: bool = True) -> dict | None:
 
 
 if __name__ == "__main__":
-    run_combined(story_count=5, images_per_story=2)
+    run_combined(story_count=4, images_per_story=2)

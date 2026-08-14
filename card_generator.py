@@ -1051,6 +1051,148 @@ def build_info_slide(
     return out_path
 
 
+def _tracked_text_width(draw, text: str, font: ImageFont.FreeTypeFont, tracking: int) -> float:
+    return sum(draw.textlength(ch, font=font) for ch in text) + tracking * max(0, len(text) - 1)
+
+
+def _draw_tracked_center_text(draw, text: str, font: ImageFont.FreeTypeFont, cx: float, y: float,
+                               fill, tracking: int = 0, shadow: tuple = None):
+    """Draws `text` horizontally centered on `cx`, optionally with letter-
+    tracking (extra pixels between glyphs, for small-caps eyebrow-style
+    text) and/or a soft drop shadow (offset_x, offset_y, rgba) for
+    legibility over a busy photo. Plain draw.text() doesn't support
+    tracking, hence the per-glyph loop when tracking is non-zero."""
+    if not tracking:
+        bbox = draw.textbbox((0, 0), text, font=font)
+        x = cx - (bbox[2] - bbox[0]) / 2 - bbox[0]
+        if shadow:
+            draw.text((x + shadow[0], y + shadow[1]), text, font=font, fill=shadow[2])
+        draw.text((x, y), text, font=font, fill=fill)
+        return
+    total_w = _tracked_text_width(draw, text, font, tracking)
+    x = cx - total_w / 2
+    for ch in text:
+        w = draw.textlength(ch, font=font)
+        if shadow:
+            draw.text((x + shadow[0], y + shadow[1]), ch, font=font, fill=shadow[2])
+        draw.text((x, y), ch, font=font, fill=fill)
+        x += w + tracking
+
+
+def build_ultimate_hook_slide(
+    photo_paths: list,
+    out_path: str,
+    theme: dict = None,
+    brand_name: str = "TIMELY BROUGHT",
+    headline: str = "TOP STORIES",
+    subheading: str = None,
+    story_count: int = None,
+) -> str:
+    """
+    Builds the carousel's very FIRST slide: a 2x2 collage of this
+    batch's own story hook photos, so a viewer gets a preview of
+    everything in the carousel before swiping, instead of only seeing
+    story #1's own hook slide. Sits ahead of every story's own
+    hook+info slides in post order (see run_combined).
+
+    photo_paths: the RAW hook photo for each story in this batch (the
+    same photo_path build_carousel/build_news_card uses for that
+    story's own hook slide), in carousel order. Designed around exactly
+    4 (matching STORIES_PER_POST) for a clean 2x2 grid - if fewer than
+    4 are available the existing ones repeat to fill the grid; extras
+    beyond 4 are ignored. A missing/unreadable photo falls back to a
+    generated gradient tile rather than failing the whole slide.
+
+    theme: only used for the corner logo (theme["logo"]) - the collage
+    itself is deliberately theme-agnostic (plain bright white text, no
+    gradient) so it reads consistently regardless of which day's
+    rotating headline theme is active for the story slides that follow.
+
+    brand_name: small tracked-caps line at the top (e.g. "TIMELY
+    BROUGHT" for the English page, "TIMELY SAMACHAR" for Hindi - the
+    Hindi page's brand mark is deliberately kept in Latin script even
+    on the Hindi carousel, see card_generator_hindi.build_ultimate_hook_slide).
+
+    headline: short line across the middle of the collage (default
+    "TOP STORIES").
+
+    subheading: bottom line; defaults to "{n} stories, one swipe away"
+    where n is story_count (or len(photo_paths), capped at 4) if not
+    given explicitly.
+
+    Background photos render at ~90% opacity (a light dark overlay, not
+    the heavier scrim used on the hook/info story slides) so the
+    collage stays vivid and photo-forward while keeping all text -
+    brand name, headline, subheading - legible in plain bright white.
+    """
+    theme = theme or random.choice(HEADLINE_THEMES)
+    n = story_count or min(len(photo_paths), 4) or 4
+    subheading = subheading or f"{n} stories, one swipe away"
+
+    canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
+
+    # --- 2x2 collage of this batch's own story photos ---
+    cols, rows = 2, 2
+    tile_w, tile_h = CANVAS_W // cols, CANVAS_H // rows
+    usable_photos = [p for p in (photo_paths or []) if p and _os.path.exists(p)]
+    for i in range(4):
+        photo = None
+        if usable_photos:
+            src = usable_photos[i % len(usable_photos)]
+            try:
+                photo = Image.open(src).convert("RGB")
+                photo = crop_to_fill(photo, tile_w + 2, tile_h + 2)
+            except Exception:
+                photo = None
+        if photo is None:
+            photo = generate_gradient_background(tile_w + 2, tile_h + 2, tag="NEWS")
+        r, c = divmod(i, cols)
+        canvas.paste(photo, (c * tile_w, r * tile_h))
+
+    # thin dividers between tiles for a clean "collage" edge
+    draw = ImageDraw.Draw(canvas)
+    draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
+    draw.line([(0, tile_h), (CANVAS_W, tile_h)], fill=BG_COLOR, width=3)
+
+    # --- scrim: background images sit at ~90% opacity (light dark
+    # overlay) so the collage stays vivid while text stays legible ---
+    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 26))  # 26/255 ~= 10% dark -> ~90% image opacity
+    canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
+    draw = ImageDraw.Draw(canvas, "RGBA")
+
+    pad_x = 40
+    white = (255, 255, 255, 255)
+
+    # --- brand name, top, bright, tracked small caps + hairline rule ---
+    eyebrow_font = _load_font(FONT_TAG, 34, variation="Bold")
+    _draw_tracked_center_text(draw, brand_name.upper(), eyebrow_font, CANVAS_W / 2, 55, white, tracking=7)
+    draw.line([(90, 120), (CANVAS_W - 90, 120)], fill=(255, 255, 255, 190), width=1)
+
+    # --- headline, centered vertically, bright with a soft shadow for
+    # legibility wherever it happens to cross the collage's tile seam ---
+    headline_font, wrapped, line_h = _autofit_text(
+        draw, headline, FONT_HEADLINE, CANVAS_W - 2 * pad_x, 260,
+        max_size=100, min_size=48, variation="Bold", line_spacing_extra=10, side_margin=24,
+    )
+    block_h = line_h * len(wrapped)
+    text_y = (CANVAS_H - block_h) // 2
+    for line in wrapped:
+        _draw_tracked_center_text(draw, line, headline_font, CANVAS_W / 2, text_y, white,
+                                   shadow=(0, 3, (0, 0, 0, 150)))
+        text_y += line_h
+
+    # --- subheading, bottom, bright ---
+    sub_font = _load_font(FONT_TAG, 36)
+    _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, CANVAS_H - 95, white)
+
+    canvas = canvas.convert("RGB")
+    if _os.path.exists(theme["logo"]):
+        _draw_logo(canvas, pad_x, CANVAS_H - 40, logo_size=100, logo_path=theme["logo"])
+
+    canvas.save(out_path, "JPEG", quality=92)
+    return out_path
+
+
 def build_carousel(
     photo_path: str,
     headline: str,

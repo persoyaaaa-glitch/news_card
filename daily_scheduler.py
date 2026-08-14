@@ -109,10 +109,21 @@ MAX_TARGET_POSTS = 25
 # Each "post" now bundles this many distinct stories into ONE combined
 # carousel (see hourly_run.run_combined) instead of one story per post -
 # so MIN/MAX_POSTS_PER_DAY x STORIES_PER_POST is the real daily story
+<<<<<<< HEAD
 # throughput (e.g. 12-18 posts x 5 stories = 60-90 stories/day). This is
 # per language - the same 5 stories are reused for both the en and hi
+=======
+# throughput (e.g. 13-23 posts x 4 stories = 52-92 stories/day). This is
+# per language - the same 4 stories are reused for both the en and hi
+>>>>>>> 2da7205 (The ultimate hook)
 # carousels of a given slot, just posted at (usually) different times.
-STORIES_PER_POST = 5
+#
+# The physical carousel is actually STORIES_PER_POST * IMAGES_PER_STORY
+# + 2 images (a fixed "ultimate hook" collage slide up front, plus a
+# fixed "follow for more" end card at the back - see
+# hourly_run.run_combined) = 4*2 + 2 = 10, exactly Instagram's
+# per-carousel image cap.
+STORIES_PER_POST = 4
 IMAGES_PER_STORY = 2
 CANDIDATE_STORY_COUNT = 6  # candidates built per slot for the PWA review screen; up to STORIES_PER_POST get selected to actually post
 
