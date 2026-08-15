@@ -1324,9 +1324,9 @@ def build_ultimate_hook_slide(
     draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
     draw.line([(0, tile_h), (CANVAS_W, tile_h)], fill=BG_COLOR, width=3)
 
-    # --- scrim: background images sit at ~90% opacity, same as the
+    # --- scrim: background images sit at ~65% opacity, same as the
     # English version, so the collage stays vivid while text stays legible ---
-    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 26))
+    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 89))
     canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(canvas, "RGBA")
 

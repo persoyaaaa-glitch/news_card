@@ -1120,7 +1120,7 @@ def build_ultimate_hook_slide(
     where n is story_count (or len(photo_paths), capped at 4) if not
     given explicitly.
 
-    Background photos render at ~90% opacity (a light dark overlay, not
+    Background photos render at ~65% opacity (a light dark overlay, not
     the heavier scrim used on the hook/info story slides) so the
     collage stays vivid and photo-forward while keeping all text -
     brand name, headline, subheading - legible in plain bright white.
@@ -1154,9 +1154,9 @@ def build_ultimate_hook_slide(
     draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
     draw.line([(0, tile_h), (CANVAS_W, tile_h)], fill=BG_COLOR, width=3)
 
-    # --- scrim: background images sit at ~90% opacity (light dark
+    # --- scrim: background images sit at ~65% opacity (light dark
     # overlay) so the collage stays vivid while text stays legible ---
-    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 26))  # 26/255 ~= 10% dark -> ~90% image opacity
+    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 89))  # 89/255 ~= 35% dark -> ~65% image opacity
     canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(canvas, "RGBA")
 
