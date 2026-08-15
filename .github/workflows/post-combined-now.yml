@@ -1,0 +1,73 @@
+name: Post combined carousel now (English + Hindi)
+
+# Manual, on-demand trigger for hourly_run.run_combined(): builds ONE
+# combined carousel (ultimate-hook collage + story_count stories x
+# images_per_story slides + follow-for-more end card) and immediately
+# posts it to BOTH the English AND Hindi Instagram accounts in a single
+# run - see run_combined()'s docstring in hourly_run.py.
+#
+# This bypasses the whole slot/schedule system in daily_scheduler.py
+# entirely (no slot_index, no planned_time, no MIN_GAP_MINUTES cooldown
+# check, no pre-generated content lookup) - it always builds fresh
+# content on the spot for both languages and posts right away. Use this
+# for an ad-hoc post outside the normal schedule, or to verify the
+# pipeline end-to-end (pair with dry_run=true first).
+#
+# For posting one already-scheduled slot's pre-built content instead,
+# use post-now.yml. For the normal recurring schedule, see
+# scheduler.yml - this workflow doesn't touch or interact with that
+# schedule/slot state at all.
+on:
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build both carousels but skip upload/publish/mark-as-posted (test run)"
+        type: boolean
+        required: true
+        default: false
+      story_count:
+        description: "Stories per carousel (physical image count = story_count*images_per_story + 2)"
+        required: true
+        default: "4"
+      images_per_story:
+        description: "Slides per story (hook + info = 2 normally)"
+        required: true
+        default: "2"
+
+concurrency:
+  group: news-carousel-scheduler
+  cancel-in-progress: false
+
+jobs:
+  post-combined-now:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Build and post the combined English + Hindi carousel
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          IG_USER_ID: ${{ secrets.IG_USER_ID }}
+          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
+          IG_USER_ID_HI: ${{ secrets.IG_USER_ID_HI }}
+          IG_ACCESS_TOKEN_HI: ${{ secrets.IG_ACCESS_TOKEN_HI }}
+          POST_HINDI_PAGE: ${{ secrets.POST_HINDI_PAGE }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          META_APP_ID: ${{ secrets.META_APP_ID }}
+          META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
+        run: >
+          python hourly_run.py
+          --story-count "${{ inputs.story_count }}"
+          --images-per-story "${{ inputs.images_per_story }}"
+          ${{ inputs.dry_run == 'true' && '--dry-run' || '' }}

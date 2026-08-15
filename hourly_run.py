@@ -1392,4 +1392,31 @@ def run_hindi_test(max_attempts: int = 30, dry_run: bool = True) -> dict | None:
 
 
 if __name__ == "__main__":
-    run_combined(story_count=4, images_per_story=2)
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="Build the combined carousel(s) for both languages but skip the Supabase "
+             "upload, Instagram publish, and mark-as-posted steps entirely - useful for "
+             "testing the ultimate-hook/follow-slide assembly and slide count without "
+             "actually posting or reserving stories.",
+    )
+    parser.add_argument(
+        "--story-count", type=int, default=4,
+        help="How many stories to bundle into the combined carousel (default 4, matching "
+             "daily_scheduler.STORIES_PER_POST). The physical carousel is always "
+             "story_count * images_per_story + 2 (ultimate-hook slide + follow-for-more "
+             "end card).",
+    )
+    parser.add_argument(
+        "--images-per-story", type=int, default=2,
+        help="How many slides each individual story contributes (default 2: hook + info).",
+    )
+    args = parser.parse_args()
+
+    run_combined(
+        story_count=args.story_count,
+        images_per_story=args.images_per_story,
+        dry_run=args.dry_run,
+    )
