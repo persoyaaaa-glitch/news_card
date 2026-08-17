@@ -48,7 +48,7 @@ import card_generator_hindi
 # for the English page that run. card_generator_hindi.HEADLINE_THEMES
 # now only contains this one entry, so grab it from there directly.
 HINDI_THEME = card_generator_hindi.HEADLINE_THEMES[0]
-from supabase_client import is_duplicate_story, get_recent_titles, mark_as_posted, upload_carousel_images, get_state, save_state
+from supabase_client import is_duplicate_story, get_recent_titles, mark_as_posted, upload_carousel_images, upload_card_image, get_state, save_state
 from instagram_publish import post_carousel_to_instagram, post_to_instagram, find_recent_matching_post
 from ai_text import (
     generate_hook_and_detail, generate_caption_and_hashtags,
@@ -1157,8 +1157,27 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
             "media_id_hi": media_id_hi, "caption_hi": caption_hi, "image_urls_hi": public_urls_hi}
 
 
+def upload_follow_end_slides() -> tuple:
+    """
+    Uploads the two static follow-for-more end-card assets (same file
+    every single time - see FOLLOW_END_SLIDE_EN/_HI) and returns their
+    public URLs. upload_card_image() upserts under a fixed remote
+    filename ("follow_end_en.jpg"/"follow_end_hi.jpg"), so calling this
+    repeatedly (once per run_combined() post, once per
+    content_pregen.py slot build, etc.) just re-overwrites the same
+    Storage object with itself and returns the same stable URL every
+    time - safe and cheap to call unconditionally rather than trying to
+    cache/skip it.
+    """
+    follow_url_en = upload_card_image(FOLLOW_END_SLIDE_EN, os.path.basename(FOLLOW_END_SLIDE_EN))
+    follow_url_hi = ""
+    if POST_HINDI:
+        follow_url_hi = upload_card_image(FOLLOW_END_SLIDE_HI, os.path.basename(FOLLOW_END_SLIDE_HI))
+    return follow_url_en, follow_url_hi
+
+
 def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_attempts: int = 80,
-                      include_global: bool = True) -> dict:
+                      include_global: bool = True, default_selected_count: int = 4) -> dict:
     """
     Like run_combined(publish=False) but does NOT merge stories into one
     carousel - each candidate story keeps its own uploaded image_urls
@@ -1172,10 +1191,14 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
     later slot picks the same story - whether or not it ends up
     selected for posting.
 
-    Returns {"candidates": [...]} where each candidate is:
-        {id, title, source, link, priority_rank, is_sensitive,
-         detail_text, caption_paragraph, title_hi, caption_paragraph_hi,
-         image_urls, image_urls_hi}
+    Returns:
+        {
+          "candidates": [...],  # {id, title, source, link, priority_rank, is_sensitive,
+                                 #  detail_text, caption_paragraph, title_hi,
+                                 #  caption_paragraph_hi, image_urls, image_urls_hi}
+          "hook_slide_url": "...", "hook_slide_url_hi": "...",
+          "follow_slide_url": "...", "follow_slide_url_hi": "...",
+        }
     caption_paragraph/caption_paragraph_hi are the longer per-story
     write-ups (see ai_text.generate_hook_and_detail /
     translate_story_to_hindi) that build_combined_caption and the
@@ -1185,6 +1208,28 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
     Sorted the same way run_combined orders a post: sensitive stories
     first, priority order within each group - so candidates[:N] is
     exactly what run_combined(story_count=N) would have picked.
+
+    hook_slide_url/hook_slide_url_hi are the SAME kind of ultimate-hook
+    collage slide run_combined() builds - built here from
+    candidates[:default_selected_count]'s own hook photos (i.e. the
+    UNTOUCHED top-priority default selection, same set
+    content_pregen.py's _slot_from_candidates uses when nobody opens
+    the review screen). IMPORTANT TRADE-OFF: if a reviewer later swaps
+    a different candidate into the final selection via the PWA (see
+    save-slot-selection), the collage photo grid is NOT regenerated -
+    it keeps showing whichever stories were on top at build time. This
+    is a deliberate simplification: rendering a fresh PIL collage is a
+    Python-only operation, and save-slot-selection is a Deno Edge
+    Function with no image-rendering capability, so it reuses this
+    already-built, already-uploaded URL as-is rather than being able to
+    regenerate it. In practice this only matters on the (rare, per the
+    module docstring) occasion someone actually reviews and changes a
+    slot's selection.
+
+    follow_slide_url/follow_slide_url_hi are the fixed, always-identical
+    follow-for-more end card (see upload_follow_end_slides()) - never
+    stale, since it's the same file regardless of which stories are
+    selected.
     """
     ensure_token_fresh(account="en")
     if POST_HINDI:
@@ -1260,7 +1305,42 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
             "image_urls_hi": image_urls_hi,
         })
 
-    return {"candidates": candidates}
+    # --- ultimate-hook collage, built from the top default_selected_count
+    # candidates' own hook photos (same priority order candidates[:N]
+    # already is) - see the docstring above for the "goes stale if a
+    # reviewer swaps a candidate later" trade-off ---
+    print("  -> building ultimate-hook preview slide(s)...")
+    default_selected = results[:default_selected_count]
+    hook_slide_path = os.path.join(CARD_DIR, f"ultimate_hook_pregen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
+    build_ultimate_hook_slide(
+        photo_paths=[r.get("photo_path") for r in default_selected],
+        out_path=hook_slide_path,
+        theme=theme,
+        story_count=len(default_selected),
+    )
+    hook_slide_url = upload_card_image(hook_slide_path, os.path.basename(hook_slide_path))
+
+    hook_slide_url_hi = ""
+    if POST_HINDI and any(r.get("slide_paths_hi") for r in default_selected):
+        hook_slide_path_hi = os.path.join(
+            CARD_DIR, f"ultimate_hook_pregen_hi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+        )
+        card_generator_hindi.build_ultimate_hook_slide(
+            photo_paths=[r.get("photo_path") for r in default_selected],
+            out_path=hook_slide_path_hi,
+            story_count=len(default_selected),
+        )
+        hook_slide_url_hi = upload_card_image(hook_slide_path_hi, os.path.basename(hook_slide_path_hi))
+
+    follow_slide_url, follow_slide_url_hi = upload_follow_end_slides()
+
+    return {
+        "candidates": candidates,
+        "hook_slide_url": hook_slide_url,
+        "hook_slide_url_hi": hook_slide_url_hi,
+        "follow_slide_url": follow_slide_url,
+        "follow_slide_url_hi": follow_slide_url_hi,
+    }
 
 def build_single_caption_hindi(caption_en: str) -> str:
     """

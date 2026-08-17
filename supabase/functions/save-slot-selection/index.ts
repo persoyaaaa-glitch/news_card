@@ -11,6 +11,16 @@
 // app_state, which the anon key can only read (see
 // supabase_app_additions.sql).
 //
+// image_urls/image_urls_hi are bookended with slot.hook_slide_url(_hi)
+// and slot.follow_slide_url(_hi) - the ultimate-hook collage and
+// follow-for-more end card, both built/uploaded once by
+// hourly_run.build_candidates at content_pregen.py build time. This
+// function can't regenerate the collage itself (no PIL/image-rendering
+// in Deno), so if the reviewer's final selection differs from the
+// top-priority default the collage was built from, the collage photos
+// stay as originally built rather than reflecting the new selection -
+// see build_candidates()'s docstring for that trade-off.
+//
 // No AI call happens here on purpose - re-running Gemini every time
 // someone toggles a checkbox or drags a reorder handle would be slow
 // and easy to rate-limit. Instead, each candidate already carries its
@@ -32,7 +42,7 @@ const CORS_HEADERS = {
 };
 
 const MAX_IMAGES = 10;   // Instagram's per-carousel cap - see hourly_run.py
-const MAX_STORIES = 5;   // STORIES_PER_POST in daily_scheduler.py
+const MAX_STORIES = 4;   // STORIES_PER_POST in daily_scheduler.py
 const IG_CAPTION_CHAR_LIMIT = 2200; // Instagram's hard cap on caption length, hashtags included
 
 const HASHTAGS_EN = "#IndiaNews #TopStories #NewsRoundup #Trending #BreakingNews " +
@@ -211,10 +221,37 @@ Deno.serve(async (req) => {
     return jsonResponse({ ok: false, error: "none of the selected ids matched this slot's candidates" }, 400);
   }
 
-  const image_urls = selected.flatMap((c) => c.image_urls || []).slice(0, MAX_IMAGES);
-  const image_urls_hi = selected.flatMap((c) => c.image_urls_hi || []).slice(0, MAX_IMAGES);
+  // Ultimate-hook collage + follow-for-more end card: built once in
+  // Python (hourly_run.build_candidates, at content_pregen.py build
+  // time) and persisted on the slot as hook_slide_url(_hi)/
+  // follow_slide_url(_hi) - this function has no image-rendering
+  // capability (it's a Deno Edge Function, not Python/PIL), so it
+  // reuses those already-uploaded URLs as-is rather than regenerating
+  // the collage against the reviewer's possibly-changed selection. See
+  // build_candidates()'s docstring for that trade-off. Missing/blank
+  // URLs (e.g. an older slot built before this feature existed, or
+  // Hindi disabled) are simply skipped, same as the Python side.
+  const hookUrl = slot.hook_slide_url || "";
+  const hookUrlHi = slot.hook_slide_url_hi || "";
+  const followUrl = slot.follow_slide_url || "";
+  const followUrlHi = slot.follow_slide_url_hi || "";
+
+  function assembleImages(hookUrl: string, storyUrls: string[], followUrl: string): string[] {
+    const bookends = (hookUrl ? 1 : 0) + (followUrl ? 1 : 0);
+    const budget = MAX_IMAGES - bookends;
+    return [
+      ...(hookUrl ? [hookUrl] : []),
+      ...storyUrls.slice(0, budget),
+      ...(followUrl ? [followUrl] : []),
+    ];
+  }
+
+  const storyImageUrls = selected.flatMap((c) => c.image_urls || []);
+  const storyImageUrlsHi = selected.flatMap((c) => c.image_urls_hi || []);
+  const image_urls = assembleImages(hookUrl, storyImageUrls, followUrl);
+  const image_urls_hi = assembleImages(hookUrlHi, storyImageUrlsHi, followUrlHi);
   const caption = templatedCaption(selected);
-  const caption_hi = image_urls_hi.length ? templatedCaptionHindi(selected) : "";
+  const caption_hi = storyImageUrlsHi.length ? templatedCaptionHindi(selected) : "";
   const stories = selected.map((c) => ({
     title: c.title, source: c.source, is_sensitive: !!c.is_sensitive, title_hi: c.title_hi || "",
   }));

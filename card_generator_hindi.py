@@ -142,6 +142,12 @@ HEADLINE_THEMES = [
     },
 ]
 
+# Fixed brand color for the ultimate-hook slide's headline (see
+# build_ultimate_hook_slide) - literally HEADLINE_THEMES[0]'s own flat
+# gold gradient (the only Hindi theme - see above), same color a normal
+# story's own hook slide already renders in.
+GOLD_HEADLINE_GRADIENT = HEADLINE_THEMES[0]["gradient"]
+
 # The Hindi account's own logo — always used for the bottom-right badge
 # on every Hindi card, regardless of which gradient theme got rotated in
 # and regardless of grayscale/sensitive treatment. Drop the file at
@@ -1324,35 +1330,49 @@ def build_ultimate_hook_slide(
     draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
     draw.line([(0, tile_h), (CANVAS_W, tile_h)], fill=BG_COLOR, width=3)
 
-    # --- scrim: background images sit at ~65% opacity, same as the
-    # English version, so the collage stays vivid while text stays legible ---
-    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 89))
+    # --- scrim: background images sit at ~50% opacity, same as the
+    # English version, so the collage stays readable while the
+    # headline's own gold gradient stays legible ---
+    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 128))
     canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(canvas, "RGBA")
 
     pad_x = 40
-    white = (255, 255, 255, 255)
+    gold = (250, 196, 127, 255)  # #fac47f - same flat gold as GOLD_HEADLINE_GRADIENT/HEADLINE_THEMES[0]
 
-    # --- brand name, top, bright, tracked Latin small caps + hairline rule ---
+    # --- brand name, top, gold, tracked Latin small caps + gold hairline rule ---
     eyebrow_font = _load_font(_font_path(font_family, "tag"), 34)
-    _draw_tracked_center_text(draw, brand_name.upper(), eyebrow_font, CANVAS_W / 2, 55, white, tracking=7)
-    draw.line([(90, 120), (CANVAS_W - 90, 120)], fill=(255, 255, 255, 190), width=1)
+    _draw_tracked_center_text(draw, brand_name.upper(), eyebrow_font, CANVAS_W / 2, 55, gold, tracking=7)
+    draw.line([(90, 120), (CANVAS_W - 90, 120)], fill=(250, 196, 127, 210), width=1)
 
-    # --- headline, centered vertically, bright with a soft shadow, Devanagari-safe (no tracking) ---
+    # --- headline, centered vertically (nudged down from dead-center), in
+    # the SAME fixed gold used for a normal Hindi story's own hook slide
+    # (HEADLINE_THEMES[0]/"bronze_gold" - the only Hindi theme, see file
+    # docstring) via _draw_gradient_text, same renderer build_carousel's
+    # hook slide uses. A soft black shadow is drawn first (gradient-filled
+    # text has no built-in shadow support) for legibility over a busy
+    # photo seam. Devanagari-safe: no per-glyph tracking anywhere in this
+    # block (see _draw_tracked_center_text's docstring for why), and
+    # _draw_gradient_text draws each full line in one call, so RAQM shapes
+    # conjuncts/matras correctly same as everywhere else in this file. ---
     headline_font, wrapped, line_h = _autofit_text(
         draw, headline, _font_path(font_family, "headline"), CANVAS_W - 2 * pad_x, 260,
         max_size=100, min_size=48, line_spacing_extra=10, side_margin=24,
     )
     block_h = line_h * len(wrapped)
-    text_y = (CANVAS_H - block_h) // 2
-    for line in wrapped:
-        _draw_tracked_center_text(draw, line, headline_font, CANVAS_W / 2, text_y, white,
-                                   shadow=(0, 3, (0, 0, 0, 150)))
-        text_y += line_h
+    text_y = (CANVAS_H - block_h) // 2 + 70
+    block_width = CANVAS_W - 2 * pad_x
+    for i, line in enumerate(wrapped):
+        bbox = draw.textbbox((0, 0), line, font=headline_font)
+        line_w = bbox[2] - bbox[0]
+        line_x = pad_x + (block_width - line_w) // 2 - bbox[0]
+        draw.text((line_x + 2, text_y + i * line_h + 3), line, font=headline_font, fill=(0, 0, 0, 150))
+    _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_h, GOLD_HEADLINE_GRADIENT,
+                         block_width=block_width, center=True)
 
-    # --- subheading, bottom, bright, Devanagari-safe (no tracking) ---
+    # --- subheading, bottom, gold, Devanagari-safe (no tracking) ---
     sub_font = _load_font(_font_path(font_family, "meta"), 36)
-    _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, CANVAS_H - 95, white)
+    _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, CANVAS_H - 95, gold)
 
     canvas = canvas.convert("RGB")
     # Always this page's own logo - never theme["logo"] - see file docstring.

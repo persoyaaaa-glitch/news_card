@@ -77,7 +77,9 @@ def _already_built(slots_state: dict, index: int) -> bool:
     return any(s.get("index") == index and s.get("image_urls") for s in slots_state["slots"])
 
 
-def _slot_from_candidates(candidates: list, selected_ids: list) -> dict:
+def _slot_from_candidates(candidates: list, selected_ids: list,
+                           hook_slide_url: str = "", hook_slide_url_hi: str = "",
+                           follow_slide_url: str = "", follow_slide_url_hi: str = "") -> dict:
     """
     Computes the fields daily_scheduler.py actually publishes
     (image_urls/caption/image_urls_hi/caption_hi/stories) from a
@@ -88,12 +90,34 @@ def _slot_from_candidates(candidates: list, selected_ids: list) -> dict:
     save-slot-selection, which writes the same fields directly to
     Supabase - see that function for why it uses a templated caption
     instead of a fresh AI call).
+
+    hook_slide_url(_hi)/follow_slide_url(_hi): the ultimate-hook collage
+    and follow-for-more end card built/uploaded once in
+    hourly_run.build_candidates (see its docstring for why the hook
+    slide doesn't get regenerated if the reviewer later swaps a
+    candidate). Prepended/appended here exactly like run_combined()
+    does with its own local-path equivalents, so a pre-generated post
+    ends up with the identical slide-1/slide-N bookends a run_combined()
+    fallback post would have had. Blank strings (not yet available, or
+    Hindi disabled) are skipped rather than inserted as empty slides.
     """
     by_id = {c["id"]: c for c in candidates}
     selected = [by_id[i] for i in selected_ids if i in by_id]
 
-    image_urls = [u for c in selected for u in c["image_urls"]][:10]
-    image_urls_hi = [u for c in selected for u in c.get("image_urls_hi", [])][:10]
+    story_image_urls = [u for c in selected for u in c["image_urls"]]
+    story_image_urls_hi = [u for c in selected for u in c.get("image_urls_hi", [])]
+
+    # Instagram's 10-image carousel cap: reserve 1 slot for the hook
+    # collage and 1 for the follow-for-more card (when present), same
+    # budgeting hourly_run.run_combined uses.
+    def _assemble(hook_url, story_urls, follow_url):
+        bookends = (1 if hook_url else 0) + (1 if follow_url else 0)
+        budget = 10 - bookends
+        parts = ([hook_url] if hook_url else []) + story_urls[:budget] + ([follow_url] if follow_url else [])
+        return parts
+
+    image_urls = _assemble(hook_slide_url, story_image_urls, follow_slide_url)
+    image_urls_hi = _assemble(hook_slide_url_hi, story_image_urls_hi, follow_slide_url_hi)
 
     caption_stories = [
         {"title": c["title"], "source": c["source"], "detail_text": c.get("detail_text"),
@@ -103,7 +127,7 @@ def _slot_from_candidates(candidates: list, selected_ids: list) -> dict:
     caption = hourly_run.build_combined_caption(caption_stories)
 
     caption_hi = ""
-    if image_urls_hi:
+    if story_image_urls_hi:
         # Same field names build_combined_caption_hindi expects
         # (headline_hi/caption_paragraph_hi/detail_hi) - candidates
         # store the Hindi headline as "title_hi", so map it across.
@@ -146,6 +170,7 @@ def _build_one_slot(index: int, iso_time: str, total_slots: int, slots_state: di
         result = hourly_run.build_candidates(
             candidate_count=CANDIDATE_STORY_COUNT,
             images_per_story=IMAGES_PER_STORY,
+            default_selected_count=STORIES_PER_POST,
         )
     except Exception:
         print(f"[slot {index + 1}] build failed - leaving unbuilt, "
@@ -159,14 +184,31 @@ def _build_one_slot(index: int, iso_time: str, total_slots: int, slots_state: di
               f"unbuilt, will build fresh at post time instead.")
         return False
 
+    hook_slide_url = result.get("hook_slide_url", "")
+    hook_slide_url_hi = result.get("hook_slide_url_hi", "")
+    follow_slide_url = result.get("follow_slide_url", "")
+    follow_slide_url_hi = result.get("follow_slide_url_hi", "")
+
     selected_ids = [c["id"] for c in candidates[:STORIES_PER_POST]]
-    computed = _slot_from_candidates(candidates, selected_ids)
+    computed = _slot_from_candidates(
+        candidates, selected_ids,
+        hook_slide_url=hook_slide_url, hook_slide_url_hi=hook_slide_url_hi,
+        follow_slide_url=follow_slide_url, follow_slide_url_hi=follow_slide_url_hi,
+    )
 
     built_slot = {
         "index": index,
         "planned_time": iso_time,
         "candidates": candidates,
         "selected_story_ids": selected_ids,
+        # Persisted so save-slot-selection (Edge Function) can rebuild
+        # image_urls/image_urls_hi later - after a reviewer changes the
+        # selection - without needing to (and being unable to, as a
+        # Deno function) regenerate the collage/end-card images itself.
+        "hook_slide_url": hook_slide_url,
+        "hook_slide_url_hi": hook_slide_url_hi,
+        "follow_slide_url": follow_slide_url,
+        "follow_slide_url_hi": follow_slide_url_hi,
         **computed,
     }
     # Replace the empty skeleton entry for this index (written at midnight

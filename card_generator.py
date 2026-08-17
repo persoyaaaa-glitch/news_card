@@ -1154,9 +1154,10 @@ def build_ultimate_hook_slide(
     draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
     draw.line([(0, tile_h), (CANVAS_W, tile_h)], fill=BG_COLOR, width=3)
 
-    # --- scrim: background images sit at ~65% opacity (light dark
-    # overlay) so the collage stays vivid while text stays legible ---
-    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 89))  # 89/255 ~= 35% dark -> ~65% image opacity
+    # --- scrim: background images sit at ~50% opacity (a heavier dark
+    # overlay than the individual story slides use) so the collage stays
+    # readable while the headline's own metallic gradient stays legible ---
+    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 128))  # 128/255 ~= 50% dark -> ~50% image opacity
     canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(canvas, "RGBA")
 
@@ -1168,18 +1169,39 @@ def build_ultimate_hook_slide(
     _draw_tracked_center_text(draw, brand_name.upper(), eyebrow_font, CANVAS_W / 2, 55, white, tracking=7)
     draw.line([(90, 120), (CANVAS_W - 90, 120)], fill=(255, 255, 255, 190), width=1)
 
-    # --- headline, centered vertically, bright with a soft shadow for
-    # legibility wherever it happens to cross the collage's tile seam ---
+    # --- headline, centered vertically (nudged down from dead-center),
+    # using the EXACT same color resolution a normal story's own hook
+    # slide uses for THIS batch's theme (see build_news_card's
+    # color_mode block) - not a hardcoded look. "silver" theme ->
+    # flat bright white, "bronze_gold" -> flat bright gold, "warm_taupe"
+    # -> its solid champagne color. Whichever theme this batch rotated
+    # to is what the ultimate-hook headline shows too, same as every
+    # other slide in the batch. Via _draw_gradient_text, same renderer
+    # build_news_card uses. A soft black shadow is drawn first
+    # (gradient-filled text has no built-in shadow support) for
+    # legibility over a busy photo seam. ---
+    color_mode = theme.get("headline_color_mode", "gradient")
+    if color_mode == "white":
+        headline_gradient_stops = ["#ffffff"] * 5
+    elif color_mode == "solid":
+        headline_gradient_stops = [theme.get("headline_solid_color", "#ffffff")] * 5
+    else:
+        headline_gradient_stops = theme["gradient"]
+
     headline_font, wrapped, line_h = _autofit_text(
         draw, headline, FONT_HEADLINE, CANVAS_W - 2 * pad_x, 260,
         max_size=100, min_size=48, variation="Bold", line_spacing_extra=10, side_margin=24,
     )
     block_h = line_h * len(wrapped)
-    text_y = (CANVAS_H - block_h) // 2
-    for line in wrapped:
-        _draw_tracked_center_text(draw, line, headline_font, CANVAS_W / 2, text_y, white,
-                                   shadow=(0, 3, (0, 0, 0, 150)))
-        text_y += line_h
+    text_y = (CANVAS_H - block_h) // 2 + 70
+    block_width = CANVAS_W - 2 * pad_x
+    for i, line in enumerate(wrapped):
+        bbox = draw.textbbox((0, 0), line, font=headline_font)
+        line_w = bbox[2] - bbox[0]
+        line_x = pad_x + (block_width - line_w) // 2 - bbox[0]
+        draw.text((line_x + 2, text_y + i * line_h + 3), line, font=headline_font, fill=(0, 0, 0, 150))
+    _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_h, headline_gradient_stops,
+                         block_width=block_width, center=True)
 
     # --- subheading, bottom, bright ---
     sub_font = _load_font(FONT_TAG, 36)
