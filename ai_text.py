@@ -554,6 +554,78 @@ def generate_digest_caption_and_hashtags(stories: list, timeout: int = 30) -> di
     return {"caption": caption, "hashtags": hashtags}
 
 
+HASHTAGS_ONLY_PROMPT_TEMPLATE = """You are picking Instagram hashtags for a single round-up carousel post on a news account. The carousel contains {count} DIFFERENT top news stories, listed below.
+
+Stories:
+{story_list}
+
+Return a list of 10-15 relevant hashtags as plain strings starting with "#", no spaces inside a tag. Mix a few broad news/discovery/round-up tags ({broad_examples}) with several SPECIFIC to the actual topics, people, places, or organizations named in the stories above - these specific tags should change from post to post based on what's actually in the stories, not be generic filler.
+{lang_instruction}
+Respond with ONLY a JSON object, no markdown fences, no preamble, in exactly this shape:
+{{"hashtags": ["#...", "#..."]}}
+"""
+
+
+def generate_digest_hashtags(stories: list, timeout: int = 20, lang: str = "en") -> list[str] | None:
+    """
+    Lightweight companion to generate_digest_caption_and_hashtags: asks
+    Gemini for JUST a hashtag list grounded in the actual stories in
+    this combined post, without also regenerating the caption text
+    (build_combined_caption / build_combined_caption_hindi already
+    build the caption itself from each story's own AI copy - this only
+    fills in the hashtag line so it tracks the real story mix instead
+    of being a fixed, story-agnostic default list).
+
+    stories: list of dicts, each with "headline" and "source" (and
+    optionally "detail" for a short one-line summary, "sensitive" for
+    the same [SENSITIVE] handling as generate_digest_caption_and_hashtags).
+
+    lang: "en" (default) or "hi" - swaps in a Hindi-audience broad-tag
+    example set and asks for a few Hindi-script discovery tags mixed
+    in, same spirit as the old DEFAULT_HASHTAGS_HI list but grounded
+    in the actual stories instead of fixed.
+
+    Returns a list of hashtag strings, or None if generation/parsing
+    failed - caller should fall back to a fixed default hashtag list
+    in that case.
+    """
+    if not stories:
+        return None
+
+    story_list = "\n".join(
+        f"{i + 1}. {'[SENSITIVE] ' if s.get('sensitive') else ''}{s['headline']} (Source: {s.get('source', 'News')})"
+        + (f" - {s['detail']}" if s.get("detail") else "")
+        for i, s in enumerate(stories)
+    )
+    if lang == "hi":
+        broad_examples = "e.g. #IndiaNews, #HindiNews, #आजकीखबर, #Breaking"
+        lang_instruction = "\nThese stories are for a Hindi-language audience - include a few Hindi-script hashtags (like #आजकीखबर) alongside the English ones.\n"
+    else:
+        broad_examples = "e.g. #IndiaNews, #TopStories, #NewsRoundup"
+        lang_instruction = ""
+
+    prompt = HASHTAGS_ONLY_PROMPT_TEMPLATE.format(
+        count=len(stories), story_list=story_list,
+        broad_examples=broad_examples, lang_instruction=lang_instruction,
+    )
+
+    raw_text = _call_gemini(prompt, timeout=timeout, max_output_tokens=512)
+    if not raw_text:
+        return None
+
+    parsed = _extract_json(raw_text)
+    if not parsed:
+        print(f"[ai_text] could not parse Gemini digest-hashtags response as JSON: {raw_text[:200]!r}")
+        return None
+
+    hashtags = [h.strip() for h in (parsed.get("hashtags") or []) if h.strip()]
+    if not hashtags:
+        print(f"[ai_text] Gemini digest-hashtags response missing hashtags: {parsed!r}")
+        return None
+
+    return hashtags
+
+
 def format_instagram_caption(result: dict, source: str) -> str:
     """
     Assembles the final caption text posted to Instagram: the AI caption,

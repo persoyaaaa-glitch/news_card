@@ -53,6 +53,7 @@ from instagram_publish import post_carousel_to_instagram, post_to_instagram, fin
 from ai_text import (
     generate_hook_and_detail, generate_caption_and_hashtags,
     format_instagram_caption, generate_digest_caption_and_hashtags,
+    generate_digest_hashtags,
     translate_story_to_hindi, translate_text_to_hindi, translate_caption_to_hindi,
 )
 
@@ -834,14 +835,20 @@ def build_combined_caption(results: list) -> str:
     slot's stories (the PWA's review screen, or content_pregen's
     default priority order before review) reorders the caption too.
 
-    No AI call happens here - every story's paragraph was already
-    generated once when its candidate was built (_build_post /
-    build_candidates), so this is just formatting + fitting Instagram's
-    caption length cap (see _fit_caption, which trims each story's
-    paragraph to fit rather than dropping stories). Falls back to
-    detail_text, then just the bare headline, for any one story that's
-    missing a caption_paragraph (e.g. AI generation failed for that
-    story only).
+    The per-story TEXT (title/body) was already generated once when
+    each candidate was built (_build_post / build_candidates), so no
+    extra AI call is needed for that - this is just formatting +
+    fitting Instagram's caption length cap (see _fit_caption, which
+    trims each story's paragraph to fit rather than dropping stories).
+    Falls back to detail_text, then just the bare headline, for any
+    one story that's missing a caption_paragraph (e.g. AI generation
+    failed for that story only).
+
+    The HASHTAGS, however, are generated fresh here via one extra
+    Gemini call (see ai_text.generate_digest_hashtags), grounded in
+    this specific batch of stories, so they actually reflect what's in
+    the post instead of always being the same fixed list. Falls back
+    to DEFAULT_HASHTAGS_EN if that call fails.
     """
     intro = f"Today's top {len(results)} stories - here's what's happening:"
     parts = [
@@ -852,7 +859,22 @@ def build_combined_caption(results: list) -> str:
         }
         for r in results
     ]
-    return _fit_caption(intro, parts, DEFAULT_HASHTAGS_EN)
+
+    hashtag_stories = [
+        {
+            "headline": r["title"],
+            "source": r["source"],
+            "detail": r.get("detail_text") or "",
+            "sensitive": r.get("is_sensitive", False),
+        }
+        for r in results
+    ]
+    hashtags = generate_digest_hashtags(hashtag_stories)
+    if not hashtags:
+        print("  -> digest hashtag generation failed, falling back to default hashtags")
+        hashtags = DEFAULT_HASHTAGS_EN
+
+    return _fit_caption(intro, parts, hashtags)
 
 
 def build_combined_caption_hindi(results: list) -> str:
@@ -864,7 +886,10 @@ def build_combined_caption_hindi(results: list) -> str:
 
     No extra translation call happens here either - translation to
     Hindi already happened once per story at build time, same as the
-    English side above.
+    English side above. The hashtags, same as build_combined_caption,
+    are generated fresh per batch (see ai_text.generate_digest_hashtags
+    with lang="hi") rather than reused from a fixed list, falling back
+    to DEFAULT_HASHTAGS_HI if that call fails.
     """
     intro = f"आज की {len(results)} बड़ी खबरें:"
     parts = [
@@ -875,7 +900,22 @@ def build_combined_caption_hindi(results: list) -> str:
         }
         for r in results
     ]
-    return _fit_caption(intro, parts, DEFAULT_HASHTAGS_HI)
+
+    hashtag_stories = [
+        {
+            "headline": r.get("headline_hi") or r["title"],
+            "source": r["source"],
+            "detail": r.get("detail_hi") or "",
+            "sensitive": r.get("is_sensitive", False),
+        }
+        for r in results
+    ]
+    hashtags = generate_digest_hashtags(hashtag_stories, lang="hi")
+    if not hashtags:
+        print("  -> [hi] digest hashtag generation failed, falling back to default hashtags")
+        hashtags = DEFAULT_HASHTAGS_HI
+
+    return _fit_caption(intro, parts, hashtags)
 
 
 FOLLOW_END_SLIDE_EN = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "follow_end_en.jpg")
