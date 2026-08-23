@@ -17,6 +17,7 @@ import os
 import json
 import re
 import time
+import base64
 import requests
 from dotenv import load_dotenv
 
@@ -111,11 +112,18 @@ def _wait_for_rate_limit_slot():
     _last_call_at = time.monotonic()
 
 
-def _call_gemini(prompt: str, timeout: int = 30, max_output_tokens: int = 4096,
-                  response_schema: dict = None) -> str | None:
-    """Shared low-level call: sends a prompt to Gemini, returns the raw
+def _call_gemini(prompt: str = None, timeout: int = 30, max_output_tokens: int = 4096,
+                  response_schema: dict = None, parts: list = None) -> str | None:
+    """Shared low-level call: sends a prompt (or a pre-built multimodal
+    `parts` list - see is_real_news_photo) to Gemini, returns the raw
     text response (still possibly fenced JSON, unless response_schema
     is given) or None on any failure.
+
+    parts: pass this INSTEAD of prompt for a multimodal request (e.g.
+    an inline_data image part alongside a text part) - when given, it's
+    sent as-is as the single user turn's `parts` array. When omitted,
+    `prompt` is wrapped as the lone text part, same as before this
+    parameter existed - every existing text-only caller is unaffected.
 
     max_output_tokens: raise this for prompts producing a lot of output
     (e.g. a batched multi-story call) - a tight cap truncates the JSON
@@ -137,6 +145,11 @@ def _call_gemini(prompt: str, timeout: int = 30, max_output_tokens: int = 4096,
     If quota was already confirmed exhausted earlier this run (see
     _quota_exhausted), returns None immediately without even trying -
     no point spending another 100+s to rediscover the same daily limit.
+    Shared between text and vision calls: an image-classification call
+    counts against the exact same daily quota as a text call, so if
+    text generation already tripped the breaker this run, vision checks
+    correctly skip too instead of burning more retries on a quota
+    that's already known to be exhausted.
     """
     global _quota_exhausted
 
@@ -146,6 +159,8 @@ def _call_gemini(prompt: str, timeout: int = 30, max_output_tokens: int = 4096,
 
     if _quota_exhausted:
         return None
+
+    request_parts = parts if parts is not None else [{"text": prompt}]
 
     generation_config = {
         "maxOutputTokens": max_output_tokens,
@@ -162,7 +177,7 @@ def _call_gemini(prompt: str, timeout: int = 30, max_output_tokens: int = 4096,
                 GEMINI_URL,
                 params={"key": GEMINI_API_KEY},
                 json={
-                    "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+                    "contents": [{"role": "user", "parts": request_parts}],
                     "generationConfig": generation_config,
                 },
                 timeout=timeout,
@@ -231,6 +246,90 @@ def _validate_highlight(highlight: str | None, hook: str | None) -> str | None:
         print(f"[ai_text] highlight {highlight!r} not found verbatim in hook {hook!r} - dropping")
         return None
     return highlight
+
+
+IMAGE_VERDICT_PROMPT = (
+    "You are a quality filter for an Instagram news carousel. Look at this image, which "
+    "was auto-scraped from a news article's page (its og:image/twitter:image tag or a "
+    "same-page <img>). Decide whether it's a genuine, usable NEWS PHOTO - a real photograph "
+    "depicting the event, people, place, or subject of a news story.\n\n"
+    "REJECT (is_real_photo: false) if the image is:\n"
+    "- A publication's own masthead/brand logo or watermark\n"
+    "- A generic template graphic (e.g. a \"BREAKING NEWS\" banner, a solid-color card with "
+    "text/headline overlaid instead of a photo, a generic \"LIVE UPDATES\" graphic)\n"
+    "- A stock/decorative graphic unrelated to any specific real-world subject (icons, "
+    "abstract art, a generic map/chart with no photographic content)\n"
+    "- Mostly text, or a screenshot of a webpage/social post/tweet rather than a photo\n\n"
+    "ACCEPT (is_real_photo: true) if it's an actual photograph of real people, places, "
+    "objects, or events - a press photo, a photojournalism-style shot, a portrait, an "
+    "official photo, etc. - even if it has minor text/logo overlays in a corner, as long as "
+    "a real photograph is clearly the main content.\n\n"
+    "Respond with ONLY a JSON object: "
+    '{"is_real_photo": true or false, "reason": "one short phrase explaining why"}'
+)
+
+IMAGE_VERDICT_SCHEMA = {
+    "type": "OBJECT",
+    "properties": {
+        "is_real_photo": {"type": "BOOLEAN"},
+        "reason": {"type": "STRING"},
+    },
+    "required": ["is_real_photo", "reason"],
+}
+
+
+def is_real_news_photo(image_path: str, timeout: int = 20) -> tuple[bool, str]:
+    """
+    Second-pass image filter, on top of image_fetch.is_usable_article_image's
+    cheap pixel heuristics (resolution/aspect-ratio/dominant-color-
+    coverage). Those catch most logos/banners for free with zero
+    network calls, but can't tell a busy multi-color infographic or a
+    collage-style banner from a real photo - only actual image
+    understanding can. This asks Gemini directly.
+
+    Meant to run ONLY on candidates that already passed the cheap
+    heuristics (see image_fetch.download_image) - never as the sole or
+    first-line filter, both to avoid spending Gemini quota on images
+    that free checks would have rejected anyway, and so this feature
+    degrades gracefully rather than being a single point of failure.
+
+    Returns (is_real_photo, reason). FAILS OPEN on any problem - no API
+    key, quota exhausted, network error, unparseable response - all
+    return (True, "...") rather than (False, "..."), so a Gemini outage
+    (or the same quota exhaustion that can hit the text-generation
+    calls) degrades to "heuristics-only filtering", never to "silently
+    reject every image". This mirrors run_combined's fallback-to-
+    templated-text pattern for text generation - AI failure should
+    degrade quality, not availability.
+    """
+    if not GEMINI_API_KEY:
+        return True, "GEMINI_API_KEY not set - skipping vision check, heuristics-only"
+    if _quota_exhausted:
+        return True, "Gemini quota already exhausted this run - skipping vision check"
+
+    try:
+        with open(image_path, "rb") as f:
+            image_bytes = f.read()
+    except OSError as e:
+        return True, f"couldn't read image file for vision check ({e}) - skipping"
+
+    b64_data = base64.b64encode(image_bytes).decode("ascii")
+
+    parts = [
+        {"inline_data": {"mime_type": "image/png", "data": b64_data}},
+        {"text": IMAGE_VERDICT_PROMPT},
+    ]
+
+    raw = _call_gemini(parts=parts, timeout=timeout, max_output_tokens=200,
+                        response_schema=IMAGE_VERDICT_SCHEMA)
+    if raw is None:
+        return True, "Gemini vision call failed - skipping check, heuristics-only"
+
+    verdict = _extract_json(raw)
+    if verdict is None or "is_real_photo" not in verdict:
+        return True, "Gemini returned an unparseable verdict - skipping check, heuristics-only"
+
+    return bool(verdict["is_real_photo"]), verdict.get("reason", "")
 
 
 def generate_hook_and_detail(headline: str, article_text: str, source: str, timeout: int = 30, sensitive: bool = False) -> tuple:

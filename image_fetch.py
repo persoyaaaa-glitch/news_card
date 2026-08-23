@@ -293,12 +293,31 @@ def _get_all_candidate_urls(article_url: str, timeout: int = 10) -> list:
         return []
 
 
-def download_image(image_url: str, out_path: str, timeout: int = 15) -> bool:
+def download_image(image_url: str, out_path: str, timeout: int = 15,
+                    vision_check: bool = True) -> bool:
     """Download an image URL, validate it looks like a real article
-    photo (see is_usable_article_image), and save it as PNG at
-    out_path. Returns False (without saving) if the download fails OR
-    the image fails validation - callers should treat both the same
-    way (try the next candidate / skip the story)."""
+    photo, and save it as PNG at out_path. Returns False (without
+    saving) if the download fails OR the image fails validation -
+    callers should treat both the same way (try the next candidate /
+    skip the story).
+
+    Two validation passes, cheapest/most decisive first:
+      1. is_usable_article_image() - free, instant, catches most
+         logos/banners/thumbnails via resolution/aspect/dominant-color
+         checks.
+      2. Gemini vision check (ai_text.is_real_news_photo), only run on
+         images that already passed pass 1 - catches the harder cases
+         (busy multi-color infographics, collage-style banners) plain
+         pixel stats can't distinguish from a real photo. Fails OPEN:
+         if Gemini is unavailable/quota-exhausted/erroring, the image
+         is accepted on pass-1 results alone rather than being rejected
+         - a Gemini outage should degrade filtering quality, not
+         availability. See is_real_news_photo's docstring.
+
+    vision_check: set False to skip pass 2 entirely (e.g. a bulk/dev
+    script that doesn't want to spend Gemini quota, or that runs before
+    GEMINI_API_KEY is configured).
+    """
     try:
         resp = requests.get(image_url, headers=HEADERS, timeout=timeout)
         resp.raise_for_status()
@@ -314,22 +333,34 @@ def download_image(image_url: str, out_path: str, timeout: int = 15) -> bool:
 
     try:
         img.save(out_path, "PNG")
-        return True
     except Exception as e:
         print(f"[image_fetch] failed to save image: {e}")
         return False
 
+    if vision_check:
+        try:
+            from ai_text import is_real_news_photo
+            is_photo, vision_reason = is_real_news_photo(out_path)
+            if not is_photo:
+                print(f"[image_fetch] rejected candidate image (Gemini vision: {vision_reason}): "
+                      f"{image_url[:100]}")
+                return False
+        except ImportError:
+            pass  # ai_text unavailable for some reason - heuristics-only, same as fail-open above
 
-def get_article_image(google_news_link: str, out_path: str) -> bool:
+    return True
+
+
+def get_article_image(google_news_link: str, out_path: str, vision_check: bool = True) -> bool:
     """
     Full pipeline: resolve redirect -> find best usable image -> download as PNG.
     Returns True on success.
     """
     article_url = resolve_article_url(google_news_link)
-    return get_article_image_from_resolved_url(article_url, out_path)
+    return get_article_image_from_resolved_url(article_url, out_path, vision_check=vision_check)
 
 
-def get_article_image_from_resolved_url(article_url: str, out_path: str) -> bool:
+def get_article_image_from_resolved_url(article_url: str, out_path: str, vision_check: bool = True) -> bool:
     """Same as get_article_image, but skips the redirect-resolution step
     when the caller already has the resolved article URL (e.g. it was
     also needed for article text extraction, so resolving it twice would
@@ -337,12 +368,13 @@ def get_article_image_from_resolved_url(article_url: str, out_path: str) -> bool
 
     Tries every non-generic-by-filename candidate on the page in order
     (see _iter_candidate_image_urls) and downloads the first one that
-    also passes pixel-level validation (resolution/aspect/flatness -
-    see is_usable_article_image), instead of committing to a single
-    og:image and giving up if it's a logo or a low-quality thumbnail.
+    also passes validation (see download_image - pixel heuristics, then
+    an optional Gemini vision second pass), instead of committing to a
+    single og:image and giving up if it's a logo or a low-quality
+    thumbnail.
     """
     for image_url in _get_all_candidate_urls(article_url):
-        if download_image(image_url, out_path):
+        if download_image(image_url, out_path, vision_check=vision_check):
             return True
     return False
 
