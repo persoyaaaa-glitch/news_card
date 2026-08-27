@@ -573,15 +573,27 @@ def fetch_best_and_breaking_news(
 
     Returns a list of dicts, sorted best-first, each with added keys:
       - is_breaking (bool)
+      - is_india_related (bool) - True if the story showed up via any
+        India-edition angle (India Google News edition or a
+        TRUSTED_RSS_FEEDS publisher); False means it was only ever
+        picked up by the global/international angles. Only meaningful
+        when include_global=True actually mixed both pools together -
+        with include_global=False every story is India-related by
+        construction. Use this to restrict India-only content (e.g.
+        the Hindi page) without needing a second, separate fetch.
       - priority_score (float) - the raw composite score, mainly useful
         for debugging/tuning
       - priority_rank (int) - 1 = the best story in the batch, 2 = next
         best, etc. - every returned story gets a rank, not just the top
         one
     """
-    # Build the full list of fetch jobs up front: (label, weight, fetch_fn)
-    # so they can all be dispatched to the thread pool together.
-    jobs = []  # list of (label, weight, callable_returning_items)
+    # Build the full list of fetch jobs up front: (label, weight, fetch_fn,
+    # is_global) so they can all be dispatched to the thread pool
+    # together. is_global tags which edition/feed-set an angle belongs
+    # to, so every item ingested from it can be tagged the same way
+    # (see _ingest below) - this is what lets callers later restrict a
+    # post (e.g. the Hindi page) to India-related stories only.
+    jobs = []  # list of (label, weight, callable_returning_items, is_global)
 
     india_queries = _SURFACE_QUERIES + _INDIA_ONLY_QUERIES
     for query in india_queries:
@@ -591,13 +603,14 @@ def fetch_best_and_breaking_news(
             if query is None
             else (lambda q=query: fetch_news(q, limit=limit_per_query, lang=lang, country=country))
         )
-        jobs.append((f"IN google:{query}", weight, fn))
+        jobs.append((f"IN google:{query}", weight, fn, False))
 
     if country == "IN" and lang == "en":
         for source_name, feed_url in TRUSTED_RSS_FEEDS:
             jobs.append((
                 f"IN feed:{source_name}", TRUSTED_FEED_WEIGHT_INDIA,
                 lambda s=source_name, u=feed_url: fetch_trusted_feed(s, u, limit=limit_per_query),
+                False,
             ))
 
     if include_global:
@@ -609,12 +622,13 @@ def fetch_best_and_breaking_news(
                 if query is None
                 else (lambda q=query: fetch_news(q, limit=limit_per_query, lang="en", country="US"))
             )
-            jobs.append((f"GLOBAL google:{query}", weight, fn))
+            jobs.append((f"GLOBAL google:{query}", weight, fn, True))
 
         for source_name, feed_url in GLOBAL_RSS_FEEDS:
             jobs.append((
                 f"GLOBAL feed:{source_name}", TRUSTED_FEED_WEIGHT_GLOBAL,
                 lambda s=source_name, u=feed_url: fetch_trusted_feed(s, u, limit=limit_per_query),
+                True,
             ))
 
     # Dispatch every job in parallel - this is the piece that makes ~65
@@ -632,22 +646,22 @@ def fetch_best_and_breaking_news(
     # pool down without waiting for stragglers - any job still running
     # past the deadline is simply dropped from this batch rather than
     # blocking it.
-    fetched = []  # list of (weight, items)
+    fetched = []  # list of (weight, items, is_global)
     pool = ThreadPoolExecutor(max_workers=max_workers)
     try:
-        future_to_job = {pool.submit(fn): (label, weight) for label, weight, fn in jobs}
+        future_to_job = {pool.submit(fn): (label, weight, is_global) for label, weight, fn, is_global in jobs}
         overall_deadline = _FEED_FETCH_TIMEOUT + 20  # generous cushion over one feed's own timeout
         try:
             for future in as_completed(future_to_job, timeout=overall_deadline):
-                label, weight = future_to_job[future]
+                label, weight, is_global = future_to_job[future]
                 try:
                     items = future.result()
                 except Exception as e:
                     print(f"[news_source] angle {label!r} failed: {e}")
                     continue
-                fetched.append((weight, items))
+                fetched.append((weight, items, is_global))
         except _FutureTimeoutError:
-            stuck = [label for f, (label, _) in future_to_job.items() if not f.done()]
+            stuck = [label for f, (label, _, _) in future_to_job.items() if not f.done()]
             print(f"[news_source] fan-out hit {overall_deadline}s deadline, dropping {len(stuck)} still-running angle(s): {stuck}")
     finally:
         pool.shutdown(wait=False, cancel_futures=True)
@@ -657,13 +671,14 @@ def fetch_best_and_breaking_news(
     combined = []              # one entry per unique story
     cross_query_hits = []      # count of which angles matched each story (parallel to combined)
     best_ranks = []            # best-seen (-weight, position) per story (parallel to combined)
+    found_india = []           # True if this story showed up in at least one India-edition angle (parallel to combined)
     # Blocking index (first normalized word -> indices into combined) so
     # fuzzy-dedup only compares each new item against plausible matches
     # instead of every story seen so far - needed to keep dedup fast now
     # that a single pull can easily surface 1000+ raw items.
     first_word_index = {}
 
-    def _ingest(items: list, weight: float) -> None:
+    def _ingest(items: list, weight: float, is_global_angle: bool) -> None:
         """Merge a batch of items (from one angle) into combined/dedup state."""
         for position, item in enumerate(items):
             title, link = item.get("title", "").strip(), item.get("link", "").strip()
@@ -692,6 +707,12 @@ def fetch_best_and_breaking_news(
                 candidate_rank = (-weight, position)
                 if candidate_rank < best_ranks[match_idx]:
                     best_ranks[match_idx] = candidate_rank
+                # A story counts as India-related if it showed up in ANY
+                # India-edition angle, even if it was first seen via a
+                # global angle (e.g. a story global wire services picked
+                # up that Indian outlets are also independently covering).
+                if not is_global_angle:
+                    found_india[match_idx] = True
                 continue
 
             seen_links.add(link)
@@ -700,17 +721,26 @@ def fetch_best_and_breaking_news(
             combined.append(item)
             cross_query_hits.append(1)
             best_ranks.append((-weight, position))
+            found_india.append(not is_global_angle)
             first_word_index.setdefault(first_word, []).append(new_idx)
 
-    for weight, items in fetched:
-        _ingest(items, weight)
+    for weight, items, is_global_angle in fetched:
+        _ingest(items, weight, is_global_angle)
 
-    for item, hit_count, (neg_weight, position) in zip(combined, cross_query_hits, best_ranks):
+    for item, hit_count, (neg_weight, position), from_india in zip(combined, cross_query_hits, best_ranks, found_india):
         item["is_breaking"] = (
             _looks_breaking_by_keyword(item["title"])
             or _is_fresh(item.get("published_parsed"))
             or hit_count >= _BREAKING_CROSS_QUERY_COUNT
         )
+        # is_india_related: True if this story ever appeared via an
+        # India-edition angle (India Google News edition or a
+        # TRUSTED_RSS_FEEDS publisher) - False means it was ONLY ever
+        # seen via the global/international angles. Callers building
+        # India-only content (e.g. the Hindi page) should filter on
+        # this rather than assuming every story in the pool is Indian,
+        # since include_global=True mixes both into one ranked list.
+        item["is_india_related"] = from_india
         item["priority_score"] = _priority_score(item, hit_count, -neg_weight, position)
 
     combined.sort(key=lambda it: it["priority_score"], reverse=True)

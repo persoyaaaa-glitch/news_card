@@ -254,6 +254,12 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
     title, link, source = article["title"], article["link"], article["source"] or "News"
     is_breaking = article.get("is_breaking", False)
     priority_rank = article.get("priority_rank")
+    # Default True (not just "falsy skipped") so pools built with
+    # include_global=False, or any older/other article source that
+    # never set this key, are still treated as India-related rather
+    # than silently excluded from the Hindi page - see
+    # news_source.fetch_best_and_breaking_news's docstring.
+    is_india_related = article.get("is_india_related", True)
 
     if verbose:
         rank_tag = f"[#{priority_rank}] " if priority_rank else ""
@@ -351,8 +357,10 @@ def _build_post(article: dict, out_dir: str = CARD_DIR, tmp_dir: str = TMP_DIR,
         "source": source,
         "is_breaking": is_breaking,
         "is_sensitive": sensitive,
+        "is_india_related": is_india_related,  # see news_source.fetch_best_and_breaking_news - gates Hindi eligibility (_build_hindi_slides is only called for these)
         "priority_rank": priority_rank,
         "tag": tag,
+        "display_headline": display_headline,  # the AI hook headline actually shown on this story's own hook slide - used to caption its tile on the ultimate-hook collage (see build_ultimate_hook_slide's hook_lines)
         "photo_path": img_path,  # raw source photo for THIS story's own hook slide (None for a generated-bg story) - reused as-is for the ultimate-hook collage tile, no re-fetch/re-slug needed
         "slide_paths": slide_paths,
         "caption": caption,
@@ -1060,6 +1068,7 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
         out_path=ultimate_hook_path,
         theme=hook_theme,
         story_count=len(results),
+        hook_lines=[r.get("display_headline") or r["title"] for r in results],
     )
 
     all_story_slide_paths = [p for r in results for p in r["slide_paths"]]
@@ -1079,11 +1088,19 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
     # photos/theme. Built regardless of dry_run/publish so a dry run
     # previews both languages - only the actual upload/publish calls
     # further down are gated on those flags, same as the English path.
-    all_slide_paths_hi, caption_hi = [], ""
+    # Restricted to India-related stories only (Hindi's audience is
+    # India-only) - a global-only story simply doesn't get a Hindi
+    # slide, same graceful drop as a translation failure below, so the
+    # Hindi carousel can end up with fewer than len(results) stories
+    # if the English batch pulled in global coverage.
+    all_slide_paths_hi, caption_hi = [], "" 
     if POST_HINDI:
         print(f"  -> [hi] translating and building the Hindi carousel for the same {len(results)} stories...")
         hi_results = []
         for r in results:
+            if not r.get("is_india_related", True):
+                print(f"  -> [hi] skipping non-India story (not relevant for Hindi audience): {r['title'][:60]}")
+                continue
             hi = _build_hindi_slides(r, theme=theme)
             if hi is None:
                 continue  # translation failed for this one story - it's simply absent from the Hindi post
@@ -1106,6 +1123,7 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
                 photo_paths=[r.get("photo_path") for r in hi_results],
                 out_path=ultimate_hook_path_hi,
                 story_count=len(hi_results),
+                hook_lines=[r.get("headline_hi") or r["title"] for r in hi_results],
             )
             all_story_slide_paths_hi = [p for r in hi_results for p in r["slide_paths_hi"]]
             all_slide_paths_hi = [ultimate_hook_path_hi] + all_story_slide_paths_hi + [FOLLOW_END_SLIDE_HI]
@@ -1314,6 +1332,12 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
     if POST_HINDI:
         print(f"  -> [hi] translating {len(results)} candidate stories...")
         for r in results:
+            if not r.get("is_india_related", True):
+                print(f"  -> [hi] skipping non-India candidate (not relevant for Hindi audience): {r['title'][:60]}")
+                r["slide_paths_hi"] = []
+                r["headline_hi"] = ""
+                r["caption_paragraph_hi"] = ""
+                continue
             hi = _build_hindi_slides(r, theme=theme)
             if hi is None:
                 r["slide_paths_hi"] = []
@@ -1337,6 +1361,7 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
             "link": r["link"],
             "priority_rank": r["priority_rank"],
             "is_sensitive": r.get("is_sensitive", False),
+            "is_india_related": r.get("is_india_related", True),
             "detail_text": r.get("detail_text"),
             "caption_paragraph": r.get("caption_paragraph") or "",
             "title_hi": r.get("headline_hi", ""),
@@ -1357,6 +1382,7 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
         out_path=hook_slide_path,
         theme=theme,
         story_count=len(default_selected),
+        hook_lines=[r.get("display_headline") or r["title"] for r in default_selected],
     )
     hook_slide_url = upload_card_image(hook_slide_path, os.path.basename(hook_slide_path))
 
@@ -1369,6 +1395,7 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
             photo_paths=[r.get("photo_path") for r in default_selected],
             out_path=hook_slide_path_hi,
             story_count=len(default_selected),
+            hook_lines=[r.get("headline_hi") or r["title"] for r in default_selected],
         )
         hook_slide_url_hi = upload_card_image(hook_slide_path_hi, os.path.basename(hook_slide_path_hi))
 
@@ -1452,6 +1479,10 @@ def run_hindi_test(max_attempts: int = 30, dry_run: bool = True) -> dict | None:
 
     for article in articles:
         title, link, source = article["title"], article["link"], article["source"] or "News"
+
+        if not article.get("is_india_related", True):
+            print(f"[hi-test] Skipping non-India story (not relevant for Hindi audience): {title[:60]}")
+            continue
 
         if is_duplicate_story(title, link, recent_titles=recent_titles):
             print(f"[hi-test] Skipping (already posted / near-duplicate): {title[:60]}")

@@ -1272,6 +1272,30 @@ def _draw_tracked_center_text(draw, text: str, font: ImageFont.FreeTypeFont, cx:
         x += w + tracking
 
 
+def _truncate_to_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width: int) -> str:
+    """
+    Shortens `text` with a trailing ellipsis so it fits within
+    max_width pixels at the given font - Hindi mirror of
+    card_generator._truncate_to_width, used for the short per-tile
+    hook-line captions on the ultimate-hook collage. Devanagari-safe:
+    just does a plain character-count binary search against
+    draw.textlength (same font/raqm layout used everywhere else in
+    this file), no per-glyph tracking involved.
+    """
+    if draw.textlength(text, font=font) <= max_width:
+        return text
+    ellipsis = "…"
+    lo, hi = 0, len(text)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        candidate = text[:mid].rstrip() + ellipsis
+        if draw.textlength(candidate, font=font) <= max_width:
+            lo = mid
+        else:
+            hi = mid - 1
+    return (text[:lo].rstrip() + ellipsis) if lo > 0 else ellipsis
+
+
 def build_ultimate_hook_slide(
     photo_paths: list,
     out_path: str,
@@ -1281,6 +1305,7 @@ def build_ultimate_hook_slide(
     headline: str = "हर बड़ी खबर",
     subheading: str = None,
     story_count: int = None,
+    hook_lines: list = None,
 ) -> str:
     """
     Hindi mirror of card_generator.build_ultimate_hook_slide. Builds the
@@ -1302,6 +1327,16 @@ def build_ultimate_hook_slide(
     but the corner logo ALWAYS comes from HINDI_LOGO_PATH, never
     theme["logo"] - same rule as every other slide in this file (see
     file docstring / build_news_card).
+
+    hook_lines: one short caption per story (Hindi text, e.g. each
+    story's headline_hi), in the SAME order as photo_paths - drawn as a
+    small one-line label over its matching tile, same purpose and
+    positioning logic as card_generator.build_ultimate_hook_slide's
+    hook_lines (row-1 captions sit just above the middle headline,
+    row-2 just below it, positions derived from the headline's own
+    computed geometry so they never overlap it). Rendered through the
+    same RAQM-backed font path as every other Hindi label in this file
+    so conjuncts/matras shape correctly. Optional - pass None to skip.
     """
     n = story_count or min(len(photo_paths), 4) or 4
     subheading = subheading or f"{n} कहानियां, एक स्वाइप दूर"
@@ -1311,11 +1346,24 @@ def build_ultimate_hook_slide(
     # --- 2x2 collage of this batch's own story photos ---
     cols, rows = 2, 2
     tile_w, tile_h = CANVAS_W // cols, CANVAS_H // rows
-    usable_photos = [p for p in (photo_paths or []) if p and _os.path.exists(p)]
+    # Pair each photo with its own hook line BEFORE filtering out
+    # missing/unreadable photos, so a caption never ends up attached to
+    # the wrong tile if an earlier story in the batch has no photo.
+    raw_lines = hook_lines or [None] * len(photo_paths or [])
+    pairs = [
+        (p, h) for p, h in zip(photo_paths or [], raw_lines)
+        if p and _os.path.exists(p)
+    ]
+    usable_photos = [p for p, _ in pairs]
+    usable_hook_lines = [h for _, h in pairs]
+    tile_lines = []  # the hook line actually paired with each tile, in tile order (0-3)
     for i in range(4):
         photo = None
+        line = None
         if usable_photos:
-            src = usable_photos[i % len(usable_photos)]
+            idx = i % len(usable_photos)
+            src = usable_photos[idx]
+            line = usable_hook_lines[idx]
             try:
                 photo = Image.open(src).convert("RGB")
                 photo = crop_to_fill(photo, tile_w + 2, tile_h + 2)
@@ -1323,8 +1371,11 @@ def build_ultimate_hook_slide(
                 photo = None
         if photo is None:
             photo = generate_gradient_background(tile_w + 2, tile_h + 2, tag="NEWS")
+            if not usable_photos:
+                line = raw_lines[i] if i < len(raw_lines) else None
         r, c = divmod(i, cols)
         canvas.paste(photo, (c * tile_w, r * tile_h))
+        tile_lines.append(line)
 
     draw = ImageDraw.Draw(canvas)
     draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
@@ -1369,6 +1420,36 @@ def build_ultimate_hook_slide(
         draw.text((line_x + 2, text_y + i * line_h + 3), line, font=headline_font, fill=(0, 0, 0, 150))
     _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_h, GOLD_HEADLINE_GRADIENT,
                          block_width=block_width, center=True)
+
+    # --- per-tile hook-line captions, positioned relative to the
+    # headline block computed above (text_y/block_h) so they never
+    # overlap it: row-1 tiles get their caption anchored just ABOVE the
+    # headline, row-2 tiles just BELOW it. Devanagari-safe: drawn with
+    # a single draw.text() call per caption (no per-glyph tracking). ---
+    if tile_lines and any(tile_lines):
+        caption_font = _load_font(_font_path(font_family, "tag"), 30)
+        caption_pad_x, caption_pad_y = 20, 8
+        row1_caption_bottom = text_y - 16
+        row2_caption_top = text_y + block_h + 16
+        for i in range(4):
+            line = tile_lines[i]
+            if not line:
+                continue
+            r, c = divmod(i, cols)
+            tile_cx = c * tile_w + tile_w / 2
+            max_text_w = tile_w - 2 * (pad_x - 10)
+            fitted = _truncate_to_width(draw, line, caption_font, max_text_w)
+            bbox = draw.textbbox((0, 0), fitted, font=caption_font)
+            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+            box_w, box_h = text_w + 2 * caption_pad_x, text_h + 2 * caption_pad_y
+            box_x0 = tile_cx - box_w / 2
+            box_y0 = (row1_caption_bottom - box_h) if r == 0 else row2_caption_top
+            box = [box_x0, box_y0, box_x0 + box_w, box_y0 + box_h]
+            draw.rounded_rectangle(box, radius=8, fill=(0, 0, 0, 150))
+            draw.text(
+                (box_x0 + caption_pad_x - bbox[0], box_y0 + caption_pad_y - bbox[1]),
+                fitted, font=caption_font, fill=(255, 255, 255, 255),
+            )
 
     # --- subheading, bottom, gold, Devanagari-safe (no tracking) ---
     sub_font = _load_font(_font_path(font_family, "meta"), 36)

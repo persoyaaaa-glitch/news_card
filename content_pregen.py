@@ -134,12 +134,21 @@ def _slot_from_candidates(candidates: list, selected_ids: list,
         # No AI call here: every story's Hindi text was already
         # translated once when its candidate was built (see
         # hourly_run.build_candidates / _build_hindi_slides).
+        #
+        # Filtered to candidates that actually HAVE Hindi images
+        # (image_urls_hi) - a candidate with none is either a
+        # non-India story (see hourly_run's is_india_related gate) or
+        # one whose translation failed, and either way it has no
+        # title_hi/caption_paragraph_hi to show. Without this filter
+        # build_combined_caption_hindi would fall back to that story's
+        # ENGLISH title for the "Hindi" caption, which is wrong.
         caption_stories_hi = [
             {"title": c["title"], "source": c["source"], "headline_hi": c.get("title_hi"),
              "caption_paragraph_hi": c.get("caption_paragraph_hi")}
-            for c in selected
+            for c in selected if c.get("image_urls_hi")
         ]
-        caption_hi = hourly_run.build_combined_caption_hindi(caption_stories_hi)
+        if caption_stories_hi:
+            caption_hi = hourly_run.build_combined_caption_hindi(caption_stories_hi)
 
     stories = [
         {"title": c["title"], "source": c["source"], "is_sensitive": c.get("is_sensitive", False),
