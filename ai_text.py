@@ -11,7 +11,19 @@ the actual scraped text, not just the URL), so it shouldn't invent facts,
 but it IS generated text rather than a direct quote, so treat it as a
 paraphrase/summary rather than verbatim reporting.
 
-Requires GEMINI_API_KEY in .env - get one at https://aistudio.google.com/apikey
+Requires at least one Gemini API key in .env - get one at
+https://aistudio.google.com/apikey
+
+Supports multiple keys so one key's exhausted daily free-tier quota
+doesn't take down text generation / Hindi translation for the rest of
+a run - once a key's quota is confirmed exhausted, it automatically
+rotates to the next one. Set either:
+  GEMINI_API_KEYS=key1,key2,key3       (comma-separated, preferred)
+or:
+  GEMINI_API_KEY_1=key1
+  GEMINI_API_KEY_2=key2
+  GEMINI_API_KEY_3=key3
+(GEMINI_API_KEY alone still works too, as a single key.)
 """
 import os
 import json
@@ -23,7 +35,64 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
+
+def _load_gemini_keys() -> list[str]:
+    """
+    Supports multiple Gemini API keys so a single key's exhausted daily
+    quota doesn't take down text generation / translation for the rest
+    of a run.
+
+    Preferred: GEMINI_API_KEYS="key1,key2,key3" (comma-separated).
+    Also accepted, for convenience/back-compat: GEMINI_API_KEY_1,
+    GEMINI_API_KEY_2, ... GEMINI_API_KEY_N as separate env vars, and
+    the original single GEMINI_API_KEY (used alone, or as an extra key
+    on top of the above if both are set). Duplicates are dropped while
+    preserving order.
+    """
+    keys: list[str] = []
+
+    multi = os.environ.get("GEMINI_API_KEYS", "")
+    for k in multi.split(","):
+        k = k.strip()
+        if k:
+            keys.append(k)
+
+    i = 1
+    while True:
+        k = os.environ.get(f"GEMINI_API_KEY_{i}")
+        if not k:
+            break
+        k = k.strip()
+        if k:
+            keys.append(k)
+        i += 1
+
+    single = os.environ.get("GEMINI_API_KEY", "").strip()
+    if single:
+        keys.append(single)
+
+    # de-dupe, preserve order
+    seen = set()
+    deduped = []
+    for k in keys:
+        if k not in seen:
+            seen.add(k)
+            deduped.append(k)
+    return deduped
+
+
+GEMINI_API_KEYS = _load_gemini_keys()
+# Kept for anything that only wants to check "is *a* key configured at all".
+GEMINI_API_KEY = GEMINI_API_KEYS[0] if GEMINI_API_KEYS else None
+
+# Index into GEMINI_API_KEYS of the key currently in use. Advances
+# whenever the current key's daily quota gets confirmed exhausted (see
+# _mark_current_key_exhausted), so later calls in the same run
+# automatically pick up the next fresh key instead of failing.
+_current_key_idx = 0
+# Keys (by index into GEMINI_API_KEYS) already confirmed exhausted this
+# run - skipped when rotating so we don't cycle back to a dead key.
+_exhausted_key_indices: set[int] = set()
 # Switched from gemini-3.6-flash: real-world usage (both this project's
 # own AI Studio rate-limit dashboard and a separate working app on the
 # same account) shows gemini-3.1-flash-lite getting a MUCH higher free-
@@ -47,16 +116,41 @@ _last_call_at = 0.0
 MAX_RETRIES = 3
 RETRY_BACKOFF_SECONDS = (15, 30, 60)  # used when Google doesn't send a Retry-After header
 
-# Once a single call exhausts all its retries due to persistent 429s,
-# further calls in the same run are almost certainly doomed too - a
-# retry loop this thorough (105s of backoff) failing every time usually
-# means the DAILY quota is exhausted, not a momentary per-minute burst
-# (a burst would have cleared during that backoff). Retrying identically
-# for every remaining story would just burn ~105s+ per call for nothing,
-# so we trip a breaker: skip Gemini entirely (instant fallback to
-# templated/raw text) for the rest of this process once this happens.
-# Resets automatically on the next run (new process, new import).
+# Once a single call exhausts all its retries due to persistent 429s on
+# the CURRENT key, that key's daily quota is almost certainly exhausted
+# - a retry loop this thorough (105s of backoff) failing every time
+# usually means the DAILY quota is exhausted, not a momentary per-minute
+# burst (a burst would have cleared during that backoff). Rather than
+# giving up outright, we rotate to the next configured Gemini key (see
+# GEMINI_API_KEYS / _mark_current_key_exhausted) and retry fresh on
+# that one. Only once EVERY configured key has been confirmed exhausted
+# this run do we trip the breaker below and fall back to templated/raw
+# text for good. Resets automatically on the next run (new process, new
+# import).
 _quota_exhausted = False
+
+
+def _mark_current_key_exhausted():
+    """
+    Called when the key at GEMINI_API_KEYS[_current_key_idx] has just
+    burned through MAX_RETRIES worth of 429s. Advances to the next
+    not-yet-exhausted key if one exists; otherwise trips the global
+    `_quota_exhausted` breaker so every subsequent call fails fast
+    instead of repeating a 100s+ losing retry loop per remaining story.
+    """
+    global _current_key_idx, _quota_exhausted
+    _exhausted_key_indices.add(_current_key_idx)
+
+    for idx in range(len(GEMINI_API_KEYS)):
+        if idx not in _exhausted_key_indices:
+            print(f"[ai_text] Gemini key #{_current_key_idx + 1} exhausted - "
+                  f"rotating to key #{idx + 1} of {len(GEMINI_API_KEYS)}.")
+            _current_key_idx = idx
+            return
+
+    print(f"[ai_text] All {len(GEMINI_API_KEYS)} configured Gemini key(s) are exhausted - "
+          f"falling back to templated/raw text for the rest of this run.")
+    _quota_exhausted = True
 
 PROMPT_TEMPLATE = """You are writing copy for a 2-slide Instagram news card, based on a real news article.
 
@@ -153,8 +247,9 @@ def _call_gemini(prompt: str = None, timeout: int = 30, max_output_tokens: int =
     """
     global _quota_exhausted
 
-    if not GEMINI_API_KEY:
-        print("[ai_text] GEMINI_API_KEY not set in .env - skipping AI text generation")
+    if not GEMINI_API_KEYS:
+        print("[ai_text] No Gemini API key set in .env (GEMINI_API_KEYS / GEMINI_API_KEY) - "
+              "skipping AI text generation")
         return None
 
     if _quota_exhausted:
@@ -170,59 +265,68 @@ def _call_gemini(prompt: str = None, timeout: int = 30, max_output_tokens: int =
         generation_config["responseMimeType"] = "application/json"
         generation_config["responseSchema"] = response_schema
 
-    for attempt in range(MAX_RETRIES + 1):
-        _wait_for_rate_limit_slot()
-        try:
-            resp = requests.post(
-                GEMINI_URL,
-                params={"key": GEMINI_API_KEY},
-                json={
-                    "contents": [{"role": "user", "parts": request_parts}],
-                    "generationConfig": generation_config,
-                },
-                timeout=timeout,
-            )
+    # Outer loop: one pass per Gemini key we're willing to try for this
+    # call (starts at whichever key is currently active - see
+    # _mark_current_key_exhausted - and rotates forward on exhaustion).
+    # Inner loop: the usual per-key retry/backoff on transient 429s.
+    keys_tried = 0
+    while keys_tried <= len(GEMINI_API_KEYS):
+        if _quota_exhausted:
+            return None
+        keys_tried += 1
+        current_key = GEMINI_API_KEYS[_current_key_idx]
 
-            if resp.status_code == 429:
-                if attempt >= MAX_RETRIES:
-                    print(f"[ai_text] Gemini still rate-limited after {MAX_RETRIES} retries - "
-                          f"giving up for this call. This usually means the daily quota is "
-                          f"exhausted (not a momentary burst, since that would have cleared "
-                          f"during {sum(RETRY_BACKOFF_SECONDS)}s of backoff), so skipping "
-                          f"Gemini for the rest of this run - falling back to templated/raw "
-                          f"text for every remaining story instead of repeating this same "
-                          f"losing wait each time.")
-                    _quota_exhausted = True
+        for attempt in range(MAX_RETRIES + 1):
+            _wait_for_rate_limit_slot()
+            try:
+                resp = requests.post(
+                    GEMINI_URL,
+                    params={"key": current_key},
+                    json={
+                        "contents": [{"role": "user", "parts": request_parts}],
+                        "generationConfig": generation_config,
+                    },
+                    timeout=timeout,
+                )
+
+                if resp.status_code == 429:
+                    if attempt >= MAX_RETRIES:
+                        print(f"[ai_text] Gemini key #{_current_key_idx + 1} still "
+                              f"rate-limited after {MAX_RETRIES} retries. This usually means "
+                              f"the daily quota on this key is exhausted (not a momentary "
+                              f"burst, since that would have cleared during "
+                              f"{sum(RETRY_BACKOFF_SECONDS)}s of backoff).")
+                        _mark_current_key_exhausted()
+                        break  # break inner retry loop, outer loop retries fresh on new key
+                    wait_s = float(resp.headers.get("Retry-After", RETRY_BACKOFF_SECONDS[attempt]))
+                    print(f"[ai_text] Gemini rate-limited (429) - waiting {wait_s:.0f}s before "
+                          f"retry {attempt + 1}/{MAX_RETRIES}...")
+                    time.sleep(wait_s)
+                    continue
+
+                resp.raise_for_status()
+                data = resp.json()
+                candidate = data["candidates"][0]
+                finish_reason = candidate.get("finishReason")
+                parts = candidate.get("content", {}).get("parts", [])
+                if not parts:
+                    print(f"[ai_text] Gemini returned no text (finishReason={finish_reason}) - "
+                          f"likely ran out of token budget while thinking. Try raising maxOutputTokens.")
                     return None
-                wait_s = float(resp.headers.get("Retry-After", RETRY_BACKOFF_SECONDS[attempt]))
-                print(f"[ai_text] Gemini rate-limited (429) - waiting {wait_s:.0f}s before retry "
-                      f"{attempt + 1}/{MAX_RETRIES}...")
+                return parts[0]["text"]
+
+            except (requests.Timeout, requests.ConnectionError) as e:
+                if attempt >= MAX_RETRIES:
+                    print(f"[ai_text] Gemini request failed after {MAX_RETRIES} retries: {e}")
+                    return None
+                wait_s = RETRY_BACKOFF_SECONDS[attempt]
+                print(f"[ai_text] Gemini request failed ({e}) - retrying in {wait_s}s "
+                      f"({attempt + 1}/{MAX_RETRIES})...")
                 time.sleep(wait_s)
                 continue
-
-            resp.raise_for_status()
-            data = resp.json()
-            candidate = data["candidates"][0]
-            finish_reason = candidate.get("finishReason")
-            parts = candidate.get("content", {}).get("parts", [])
-            if not parts:
-                print(f"[ai_text] Gemini returned no text (finishReason={finish_reason}) - "
-                      f"likely ran out of token budget while thinking. Try raising maxOutputTokens.")
+            except (requests.RequestException, KeyError, IndexError) as e:
+                print(f"[ai_text] Gemini request failed: {e}")
                 return None
-            return parts[0]["text"]
-
-        except (requests.Timeout, requests.ConnectionError) as e:
-            if attempt >= MAX_RETRIES:
-                print(f"[ai_text] Gemini request failed after {MAX_RETRIES} retries: {e}")
-                return None
-            wait_s = RETRY_BACKOFF_SECONDS[attempt]
-            print(f"[ai_text] Gemini request failed ({e}) - retrying in {wait_s}s "
-                  f"({attempt + 1}/{MAX_RETRIES})...")
-            time.sleep(wait_s)
-            continue
-        except (requests.RequestException, KeyError, IndexError) as e:
-            print(f"[ai_text] Gemini request failed: {e}")
-            return None
 
     return None
 
@@ -302,10 +406,10 @@ def is_real_news_photo(image_path: str, timeout: int = 20) -> tuple[bool, str]:
     templated-text pattern for text generation - AI failure should
     degrade quality, not availability.
     """
-    if not GEMINI_API_KEY:
-        return True, "GEMINI_API_KEY not set - skipping vision check, heuristics-only"
+    if not GEMINI_API_KEYS:
+        return True, "No Gemini API key set - skipping vision check, heuristics-only"
     if _quota_exhausted:
-        return True, "Gemini quota already exhausted this run - skipping vision check"
+        return True, "All Gemini keys already exhausted this run - skipping vision check"
 
     try:
         with open(image_path, "rb") as f:
