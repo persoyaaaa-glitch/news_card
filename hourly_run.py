@@ -1387,17 +1387,32 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
     hook_slide_url = upload_card_image(hook_slide_path, os.path.basename(hook_slide_path))
 
     hook_slide_url_hi = ""
-    if POST_HINDI and any(r.get("slide_paths_hi") for r in default_selected):
-        hook_slide_path_hi = os.path.join(
-            CARD_DIR, f"ultimate_hook_pregen_hi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
-        )
-        card_generator_hindi.build_ultimate_hook_slide(
-            photo_paths=[r.get("photo_path") for r in default_selected],
-            out_path=hook_slide_path_hi,
-            story_count=len(default_selected),
-            hook_lines=[r.get("headline_hi") or r["title"] for r in default_selected],
-        )
-        hook_slide_url_hi = upload_card_image(hook_slide_path_hi, os.path.basename(hook_slide_path_hi))
+    if POST_HINDI:
+        # Hindi's own top-N selection, independent of default_selected
+        # above: pulled from the FULL results pool (up to
+        # candidate_count candidates), not just the top
+        # default_selected_count overall picks - a global-only story in
+        # English's top N simply isn't India-related/translated (see
+        # is_india_related gating above, r["slide_paths_hi"] stays
+        # empty for it), so reusing default_selected here would either
+        # leak that story's ENGLISH headline into the Hindi collage via
+        # the "headline_hi or title" fallback, or force the tile-fill
+        # wraparound to repeat whichever India stories DID make it into
+        # the top N. Looking across the whole candidate pool instead
+        # gives the Hindi collage the best shot at 4 distinct India
+        # photos even when the top-N overall skews global.
+        hindi_default_selected = [r for r in results if r.get("slide_paths_hi")][:default_selected_count]
+        if hindi_default_selected:
+            hook_slide_path_hi = os.path.join(
+                CARD_DIR, f"ultimate_hook_pregen_hi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
+            )
+            card_generator_hindi.build_ultimate_hook_slide(
+                photo_paths=[r.get("photo_path") for r in hindi_default_selected],
+                out_path=hook_slide_path_hi,
+                story_count=len(hindi_default_selected),
+                hook_lines=[r.get("headline_hi") or r["title"] for r in hindi_default_selected],
+            )
+            hook_slide_url_hi = upload_card_image(hook_slide_path_hi, os.path.basename(hook_slide_path_hi))
 
     follow_slide_url, follow_slide_url_hi = upload_follow_end_slides()
 

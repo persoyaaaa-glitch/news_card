@@ -1427,7 +1427,7 @@ def build_ultimate_hook_slide(
     # headline, row-2 tiles just BELOW it. Devanagari-safe: drawn with
     # a single draw.text() call per caption (no per-glyph tracking). ---
     if tile_lines and any(tile_lines):
-        caption_font = _load_font(_font_path(font_family, "tag"), 30)
+        caption_font = _load_font(_font_path(font_family, "headline"), 30)
         caption_pad_x, caption_pad_y = 20, 8
         row1_caption_bottom = text_y - 16
         row2_caption_top = text_y + block_h + 16
@@ -1445,7 +1445,7 @@ def build_ultimate_hook_slide(
             box_x0 = tile_cx - box_w / 2
             box_y0 = (row1_caption_bottom - box_h) if r == 0 else row2_caption_top
             box = [box_x0, box_y0, box_x0 + box_w, box_y0 + box_h]
-            draw.rounded_rectangle(box, radius=8, fill=(0, 0, 0, 150))
+            draw.rounded_rectangle(box, radius=8, fill=(0, 0, 0, 102))
             draw.text(
                 (box_x0 + caption_pad_x - bbox[0], box_y0 + caption_pad_y - bbox[1]),
                 fitted, font=caption_font, fill=(255, 255, 255, 255),
