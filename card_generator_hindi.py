@@ -1297,98 +1297,87 @@ def _truncate_to_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width:
 
 
 def build_ultimate_hook_slide(
-    photo_paths: list,
+    hook_slide_paths: list,
     out_path: str,
     theme: dict = None,
     font_family: str = DEFAULT_FONT_FAMILY,
     brand_name: str = "TIMELY SAMACHAR",
-    headline: str = "हर बड़ी खबर",
     subheading: str = None,
     story_count: int = None,
-    hook_lines: list = None,
 ) -> str:
     """
     Hindi mirror of card_generator.build_ultimate_hook_slide. Builds the
-    carousel's very FIRST slide: a 2x2 collage of this batch's own story
-    hook photos, so a viewer gets a preview of everything in the Hindi
-    carousel before swiping.
+    carousel's very FIRST slide: a 2x2 collage assembled from each
+    story's OWN already-rendered Hindi hook slide (photo + that story's
+    real Hindi headline burned in, exactly as it appears as slide 1 of
+    that story's own mini-carousel), not a fresh raw-photo collage with
+    a separate caption strip drawn on top. Since every tile IS a full
+    hook slide in miniature, all 4 quadrants show their own real
+    headline directly - there's no generic "हर बड़ी खबर" middle headline
+    and no separate per-tile caption overlay, because the headline is
+    already part of the image being collaged.
 
     brand_name stays in LATIN script ("TIMELY SAMACHAR") even on the
     Hindi page by design - this is the page's brand mark, not body copy,
     so it's drawn with tracking like the English version rather than
     through the Devanagari shaping path.
 
-    headline/subheading are Devanagari by default ("हर बड़ी खबर" /
-    "{n} कहानियां, एक स्वाइप दूर") and always render through the
-    RAQM-backed _load_font/_draw_tracked_center_text(tracking=0) path so
-    conjuncts and matras shape correctly.
+    hook_slide_paths: each story's own rendered Hindi hook slide file
+    (i.e. slide_paths_hi[0] from that story's Hindi build_carousel()
+    output), in carousel order. Designed around exactly 4 (matching
+    STORIES_PER_POST) for a clean 2x2 grid - if fewer than 4 are
+    available the existing ones repeat to fill the grid; extras beyond
+    4 are ignored. A missing/unreadable file falls back to a generated
+    gradient tile rather than failing the whole slide. Each source
+    file is the full 1080x1350 canvas (same 4:5 aspect ratio as one
+    collage tile), so it scales straight down into its tile with no
+    awkward cropping.
 
     theme is accepted for call-site symmetry with the English version
-    but the corner logo ALWAYS comes from HINDI_LOGO_PATH, never
-    theme["logo"] - same rule as every other slide in this file (see
-    file docstring / build_news_card).
+    but is not otherwise used - this slide no longer draws its own
+    corner logo (each tile's own hook slide already carries its own
+    HINDI_LOGO_PATH watermark, so this collage slide doesn't draw a
+    second one on top).
 
-    hook_lines: one short caption per story (Hindi text, e.g. each
-    story's headline_hi), in the SAME order as photo_paths - drawn as a
-    small one-line label over its matching tile, same purpose and
-    positioning logic as card_generator.build_ultimate_hook_slide's
-    hook_lines (row-1 captions sit just above the middle headline,
-    row-2 just below it, positions derived from the headline's own
-    computed geometry so they never overlap it). Rendered through the
-    same RAQM-backed font path as every other Hindi label in this file
-    so conjuncts/matras shape correctly. Optional - pass None to skip.
+    subheading defaults to Devanagari ("{n} कहानियां, एक स्वाइप दूर") and
+    always renders through the RAQM-backed _load_font/
+    _draw_tracked_center_text(tracking=0) path so conjuncts and matras
+    shape correctly.
     """
-    n = story_count or min(len(photo_paths), 4) or 4
+    n = story_count or min(len(hook_slide_paths), 4) or 4
     subheading = subheading or f"{n} कहानियां, एक स्वाइप दूर"
 
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
 
-    # --- 2x2 collage of this batch's own story photos ---
+    # --- 2x2 collage of each story's own already-rendered hook slide ---
     cols, rows = 2, 2
     tile_w, tile_h = CANVAS_W // cols, CANVAS_H // rows
-    # Pair each photo with its own hook line BEFORE filtering out
-    # missing/unreadable photos, so a caption never ends up attached to
-    # the wrong tile if an earlier story in the batch has no photo.
-    raw_lines = hook_lines or [None] * len(photo_paths or [])
-    pairs = [
-        (p, h) for p, h in zip(photo_paths or [], raw_lines)
-        if p and _os.path.exists(p)
-    ]
-    usable_photos = [p for p, _ in pairs]
-    usable_hook_lines = [h for _, h in pairs]
-    tile_lines = []  # the hook line actually paired with each tile, in tile order (0-3)
+    usable = [p for p in (hook_slide_paths or []) if p and _os.path.exists(p)]
     for i in range(4):
-        photo = None
-        line = None
-        if usable_photos:
-            idx = i % len(usable_photos)
-            src = usable_photos[idx]
-            line = usable_hook_lines[idx]
+        tile = None
+        if usable:
+            src = usable[i % len(usable)]
             try:
-                photo = Image.open(src).convert("RGB")
-                photo = crop_to_fill(photo, tile_w + 2, tile_h + 2)
+                tile = Image.open(src).convert("RGB")
+                tile = crop_to_fill(tile, tile_w + 2, tile_h + 2)
             except Exception:
-                photo = None
-        if photo is None:
-            photo = generate_gradient_background(tile_w + 2, tile_h + 2, tag="NEWS")
-            if not usable_photos:
-                line = raw_lines[i] if i < len(raw_lines) else None
+                tile = None
+        if tile is None:
+            tile = generate_gradient_background(tile_w + 2, tile_h + 2, tag="NEWS")
         r, c = divmod(i, cols)
-        canvas.paste(photo, (c * tile_w, r * tile_h))
-        tile_lines.append(line)
+        canvas.paste(tile, (c * tile_w, r * tile_h))
 
     draw = ImageDraw.Draw(canvas)
     draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
     draw.line([(0, tile_h), (CANVAS_W, tile_h)], fill=BG_COLOR, width=3)
 
-    # --- scrim: background images sit at ~50% opacity, same as the
-    # English version, so the collage stays readable while the
-    # headline's own gold gradient stays legible ---
-    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 128))
+    # --- light scrim: just enough to keep the brand name/subheading
+    # legible over whatever's directly behind them, without washing out
+    # each tile's own already-processed, already-legible headline ---
+    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 60))
     canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(canvas, "RGBA")
 
-    pad_x = 40
     gold = (250, 196, 127, 255)  # #fac47f - same flat gold as GOLD_HEADLINE_GRADIENT/HEADLINE_THEMES[0]
 
     # --- brand name, top, gold, tracked Latin small caps + gold hairline rule ---
@@ -1396,70 +1385,29 @@ def build_ultimate_hook_slide(
     _draw_tracked_center_text(draw, brand_name.upper(), eyebrow_font, CANVAS_W / 2, 55, gold, tracking=7)
     draw.line([(90, 120), (CANVAS_W - 90, 120)], fill=(250, 196, 127, 210), width=1)
 
-    # --- headline, centered vertically (nudged down from dead-center), in
-    # the SAME fixed gold used for a normal Hindi story's own hook slide
-    # (HEADLINE_THEMES[0]/"bronze_gold" - the only Hindi theme, see file
-    # docstring) via _draw_gradient_text, same renderer build_carousel's
-    # hook slide uses. A soft black shadow is drawn first (gradient-filled
-    # text has no built-in shadow support) for legibility over a busy
-    # photo seam. Devanagari-safe: no per-glyph tracking anywhere in this
-    # block (see _draw_tracked_center_text's docstring for why), and
-    # _draw_gradient_text draws each full line in one call, so RAQM shapes
-    # conjuncts/matras correctly same as everywhere else in this file. ---
-    headline_font, wrapped, line_h = _autofit_text(
-        draw, headline, _font_path(font_family, "headline"), CANVAS_W - 2 * pad_x, 260,
-        max_size=100, min_size=48, line_spacing_extra=10, side_margin=24,
-    )
-    block_h = line_h * len(wrapped)
-    text_y = (CANVAS_H - block_h) // 2 + 70
-    block_width = CANVAS_W - 2 * pad_x
-    for i, line in enumerate(wrapped):
-        bbox = draw.textbbox((0, 0), line, font=headline_font)
-        line_w = bbox[2] - bbox[0]
-        line_x = pad_x + (block_width - line_w) // 2 - bbox[0]
-        draw.text((line_x + 2, text_y + i * line_h + 3), line, font=headline_font, fill=(0, 0, 0, 150))
-    _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_h, GOLD_HEADLINE_GRADIENT,
-                         block_width=block_width, center=True)
-
-    # --- per-tile hook-line captions, positioned relative to the
-    # headline block computed above (text_y/block_h) so they never
-    # overlap it: row-1 tiles get their caption anchored just ABOVE the
-    # headline, row-2 tiles just BELOW it. Devanagari-safe: drawn with
-    # a single draw.text() call per caption (no per-glyph tracking). ---
-    if tile_lines and any(tile_lines):
-        caption_font = _load_font(_font_path(font_family, "headline"), 30)
-        caption_pad_x, caption_pad_y = 20, 8
-        row1_caption_bottom = text_y - 16
-        row2_caption_top = text_y + block_h + 16
-        for i in range(4):
-            line = tile_lines[i]
-            if not line:
-                continue
-            r, c = divmod(i, cols)
-            tile_cx = c * tile_w + tile_w / 2
-            max_text_w = tile_w - 2 * (pad_x - 10)
-            fitted = _truncate_to_width(draw, line, caption_font, max_text_w)
-            bbox = draw.textbbox((0, 0), fitted, font=caption_font)
-            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            box_w, box_h = text_w + 2 * caption_pad_x, text_h + 2 * caption_pad_y
-            box_x0 = tile_cx - box_w / 2
-            box_y0 = (row1_caption_bottom - box_h) if r == 0 else row2_caption_top
-            box = [box_x0, box_y0, box_x0 + box_w, box_y0 + box_h]
-            draw.rounded_rectangle(box, radius=8, fill=(0, 0, 0, 102))
-            draw.text(
-                (box_x0 + caption_pad_x - bbox[0], box_y0 + caption_pad_y - bbox[1]),
-                fitted, font=caption_font, fill=(255, 255, 255, 255),
-            )
-
-    # --- subheading, bottom, gold, Devanagari-safe (no tracking) ---
-    sub_font = _load_font(_font_path(font_family, "meta"), 36)
-    _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, CANVAS_H - 95, gold)
+    # --- subheading, positioned at the vertical middle of the BOTTOM
+    # row of tiles - on a solid, SHARP-CORNERED (draw.rectangle, not
+    # rounded_rectangle) 40%-opacity black backing box so it stays
+    # legible over whatever tile content sits behind it. Font is the
+    # "headline" role - the SAME font each of the 4 Hindi hook slides
+    # already uses for its own headline - rather than "meta", so this
+    # line visually matches the headlines in the tiles behind it.
+    # Devanagari-safe: single draw.text() call via
+    # _draw_tracked_center_text(tracking=0), no per-glyph loop. ---
+    sub_font = _load_font(_font_path(font_family, "headline"), 36)
+    sub_bbox = draw.textbbox((0, 0), subheading, font=sub_font)
+    sub_w, sub_h = sub_bbox[2] - sub_bbox[0], sub_bbox[3] - sub_bbox[1]
+    sub_pad_x, sub_pad_y = 24, 14
+    sub_center_y = (CANVAS_H // 2 + CANVAS_H) // 2  # vertical middle of the bottom tile row
+    sub_box_w, sub_box_h = sub_w + 2 * sub_pad_x, sub_h + 2 * sub_pad_y
+    sub_box_x0 = CANVAS_W / 2 - sub_box_w / 2
+    sub_box_y0 = sub_center_y - sub_box_h / 2
+    sub_box = [sub_box_x0, sub_box_y0, sub_box_x0 + sub_box_w, sub_box_y0 + sub_box_h]
+    draw.rectangle(sub_box, fill=(0, 0, 0, 102))  # 102/255 = 40% opacity, sharp corners
+    sub_text_y = sub_box_y0 + sub_pad_y - sub_bbox[1]
+    _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, sub_text_y, gold)
 
     canvas = canvas.convert("RGB")
-    # Always this page's own logo - never theme["logo"] - see file docstring.
-    if _os.path.exists(HINDI_LOGO_PATH):
-        _draw_logo(canvas, pad_x, CANVAS_H - 40, logo_size=100, logo_path=HINDI_LOGO_PATH)
-
     canvas.save(out_path, "JPEG", quality=92)
     return out_path
 

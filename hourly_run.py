@@ -1057,18 +1057,16 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
     # non-sensitive group is otherwise preserved (still priority order).
     results.sort(key=lambda r: not r.get("is_sensitive", False))
 
-    # --- ultimate-hook collage: slide 1, built from THESE stories' own
-    # hook photos (a story with a generated background instead of a real
-    # photo simply falls back to a gradient tile in that grid position -
-    # see build_ultimate_hook_slide) ---
-    hook_theme = theme
+    # --- ultimate-hook collage: slide 1, built by collaging each of
+    # THESE stories' own already-rendered hook slides (slide_paths[0]) -
+    # a story with a generated background instead of a real photo
+    # simply falls back to a gradient tile in that grid position - see
+    # build_ultimate_hook_slide ---
     ultimate_hook_path = os.path.join(CARD_DIR, f"ultimate_hook_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
     build_ultimate_hook_slide(
-        photo_paths=[r.get("photo_path") for r in results],
+        hook_slide_paths=[r["slide_paths"][0] for r in results if r.get("slide_paths")],
         out_path=ultimate_hook_path,
-        theme=hook_theme,
         story_count=len(results),
-        hook_lines=[r.get("display_headline") or r["title"] for r in results],
     )
 
     all_story_slide_paths = [p for r in results for p in r["slide_paths"]]
@@ -1167,19 +1165,17 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
         hi_results.sort(key=lambda r: not r.get("is_sensitive", False))
 
         if hi_results:
-            # Same collage idea as the English hook slide, but Hindi text
-            # (see card_generator_hindi.build_ultimate_hook_slide) - and
-            # reuses each story's ALREADY-fetched photo_path (same photo
-            # the English hook slide used for that story), not a fresh
-            # fetch, so the two language collages show the same images.
+            # Same collage idea as the English hook slide, but built
+            # from each story's own already-rendered HINDI hook slide
+            # (slide_paths_hi[0]) instead - see
+            # card_generator_hindi.build_ultimate_hook_slide.
             ultimate_hook_path_hi = os.path.join(
                 CARD_DIR, f"ultimate_hook_hi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
             )
             card_generator_hindi.build_ultimate_hook_slide(
-                photo_paths=[r.get("photo_path") for r in hi_results],
+                hook_slide_paths=[r["slide_paths_hi"][0] for r in hi_results if r.get("slide_paths_hi")],
                 out_path=ultimate_hook_path_hi,
                 story_count=len(hi_results),
-                hook_lines=[r.get("headline_hi") or r["title"] for r in hi_results],
             )
             all_story_slide_paths_hi = [p for r in hi_results for p in r["slide_paths_hi"]]
             all_slide_paths_hi = [ultimate_hook_path_hi] + all_story_slide_paths_hi + [FOLLOW_END_SLIDE_HI]
@@ -1452,11 +1448,9 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
     default_selected = results[:default_selected_count]
     hook_slide_path = os.path.join(CARD_DIR, f"ultimate_hook_pregen_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg")
     build_ultimate_hook_slide(
-        photo_paths=[r.get("photo_path") for r in default_selected],
+        hook_slide_paths=[r["slide_paths"][0] for r in default_selected if r.get("slide_paths")],
         out_path=hook_slide_path,
-        theme=theme,
         story_count=len(default_selected),
-        hook_lines=[r.get("display_headline") or r["title"] for r in default_selected],
     )
     hook_slide_url = upload_card_image(hook_slide_path, os.path.basename(hook_slide_path))
 
@@ -1481,10 +1475,9 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
                 CARD_DIR, f"ultimate_hook_pregen_hi_{datetime.now().strftime('%Y%m%d_%H%M%S')}.jpg"
             )
             card_generator_hindi.build_ultimate_hook_slide(
-                photo_paths=[r.get("photo_path") for r in hindi_default_selected],
+                hook_slide_paths=[r["slide_paths_hi"][0] for r in hindi_default_selected],
                 out_path=hook_slide_path_hi,
                 story_count=len(hindi_default_selected),
-                hook_lines=[r.get("headline_hi") or r["title"] for r in hindi_default_selected],
             )
             hook_slide_url_hi = upload_card_image(hook_slide_path_hi, os.path.basename(hook_slide_path_hi))
 

@@ -141,7 +141,11 @@ def _photo_accent_color(img: Image.Image) -> str:
 # All 5 font files that ship in fonts/ are now wired in:
 # Oblata Display (serif) is the default description/body font, and it's
 # also the default hook headline font (matches the description slide).
-# Tag pill / meta line stay on Runtime (clean sans, reads well small).
+# Tag pill / meta line / BREAKING badge / brand name / subheading all
+# unified onto FONT_OBLATA - the same font already used for the hook
+# headline and every info-slide's body text ("the later slides") - so
+# every text element across the whole card, not just the headline,
+# reads as one consistent typeface.
 _FONT_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "fonts")
 FONT_PLAYFAIR = _os.path.join(_FONT_DIR, "PlayfairDisplay-Bold.ttf")
 FONT_RUNTIME = _os.path.join(_FONT_DIR, "RuntimeRegular-m2Odx.otf")
@@ -154,9 +158,10 @@ FONT_OBLATA = _os.path.join(_FONT_DIR, "OblataDisplayRegular-Zp8o8.otf")
 FONT_HEADLINE_CHOICES = [FONT_PLAYFAIR, FONT_RUNTIME, FONT_AVELINE, FONT_NORWAY, FONT_OBLATA]
 FONT_HEADLINE = FONT_OBLATA  # default hook headline font - same as the description body font
 
-FONT_TAG = FONT_RUNTIME
-FONT_META = FONT_RUNTIME
+FONT_TAG = FONT_OBLATA   # BREAKING badge, category tag pill, brand name eyebrow, subheading - same font as the info-slide body text
+FONT_META = FONT_OBLATA  # source line / "ILLUSTRATIVE IMAGE" label - same font as the info-slide body text
 FONT_BODY = FONT_OBLATA  # info-slide/description body text - MUST have working digit glyphs (real article text often has stats/dates) - verified Oblata Display has full digit + upper/lowercase coverage
+
 
 
 # Fallback logo if a card is built without a theme (e.g. the self-test at
@@ -1102,121 +1107,80 @@ def _truncate_to_width(draw, text: str, font: ImageFont.FreeTypeFont, max_width:
 
 
 def build_ultimate_hook_slide(
-    photo_paths: list,
+    hook_slide_paths: list,
     out_path: str,
     theme: dict = None,
     brand_name: str = "TIMELY BROUGHT",
-    headline: str = "TOP STORIES",
     subheading: str = None,
     story_count: int = None,
-    hook_lines: list = None,
 ) -> str:
     """
-    Builds the carousel's very FIRST slide: a 2x2 collage of this
-    batch's own story hook photos, so a viewer gets a preview of
-    everything in the carousel before swiping, instead of only seeing
-    story #1's own hook slide. Sits ahead of every story's own
-    hook+info slides in post order (see run_combined).
+    Builds the carousel's very FIRST slide: a 2x2 collage assembled from
+    each story's OWN already-rendered hook slide (photo + that story's
+    real headline burned in, exactly as it appears as slide 1 of that
+    story's own mini-carousel - see build_carousel/build_news_card),
+    not a fresh raw-photo collage with a separate caption strip drawn
+    on top. Since every tile IS a full hook slide in miniature, all 4
+    quadrants show their own real headline directly - there's no
+    generic "TOP STORIES" middle headline and no separate per-tile
+    caption overlay, because the headline is already part of the image
+    being collaged.
 
-    photo_paths: the RAW hook photo for each story in this batch (the
-    same photo_path build_carousel/build_news_card uses for that
-    story's own hook slide), in carousel order. Designed around exactly
-    4 (matching STORIES_PER_POST) for a clean 2x2 grid - if fewer than
-    4 are available the existing ones repeat to fill the grid; extras
-    beyond 4 are ignored. A missing/unreadable photo falls back to a
-    generated gradient tile rather than failing the whole slide.
+    hook_slide_paths: each story's own rendered hook slide file (i.e.
+    slide_paths[0] from that story's build_carousel() output), in
+    carousel order. Designed around exactly 4 (matching
+    STORIES_PER_POST) for a clean 2x2 grid - if fewer than 4 are
+    available the existing ones repeat to fill the grid; extras beyond
+    4 are ignored. A missing/unreadable file falls back to a generated
+    gradient tile rather than failing the whole slide. Each source
+    file is the full 1080x1350 canvas (same 4:5 aspect ratio as one
+    collage tile), so it scales straight down into its tile with no
+    awkward cropping.
 
-    theme: only used for the corner logo (theme["logo"]) - the collage
-    itself is deliberately theme-agnostic (plain bright white text, no
-    gradient) so it reads consistently regardless of which day's
-    rotating headline theme is active for the story slides that follow.
-
-    brand_name: small tracked-caps line at the top (e.g. "TIMELY
-    BROUGHT" for the English page, "TIMELY SAMACHAR" for Hindi - the
-    Hindi page's brand mark is deliberately kept in Latin script even
-    on the Hindi carousel, see card_generator_hindi.build_ultimate_hook_slide).
-
-    headline: short line across the middle of the collage (default
-    "TOP STORIES").
+    theme: accepted for call-site symmetry with the rest of the batch;
+    no longer used to draw a corner logo on this slide (each tile's own
+    hook slide already carries its own logo/attribution, so this
+    collage slide doesn't draw a second one on top).
 
     subheading: bottom line; defaults to "{n} stories, one swipe away"
-    where n is story_count (or len(photo_paths), capped at 4) if not
-    given explicitly.
-
-    hook_lines: one short caption per story, in the SAME order as
-    photo_paths (e.g. each story's own AI hook headline) - drawn as a
-    small one-line label over its matching tile so a viewer can tell
-    what each of the 4 photos is actually about, instead of just seeing
-    an unlabeled photo collage. Optional - pass None to skip captions
-    entirely (old behavior). Any entry that's missing/empty just skips
-    that tile's caption. Long lines are truncated with an ellipsis to
-    fit the tile width. Row-1 (top) captions sit just above the middle
-    headline text; row-2 (bottom) captions sit just below it - the
-    caption positions are derived from the headline's own computed
-    position further down, so they never overlap it regardless of how
-    many lines the headline wraps to.
-
-    Background photos render at ~65% opacity (a light dark overlay, not
-    the heavier scrim used on the hook/info story slides) so the
-    collage stays vivid and photo-forward while keeping all text -
-    brand name, headline, subheading - legible in plain bright white.
+    where n is story_count (or len(hook_slide_paths), capped at 4) if
+    not given explicitly.
     """
-    theme = theme or random.choice(HEADLINE_THEMES)
-    n = story_count or min(len(photo_paths), 4) or 4
+    n = story_count or min(len(hook_slide_paths), 4) or 4
     subheading = subheading or f"{n} stories, one swipe away"
 
     canvas = Image.new("RGB", (CANVAS_W, CANVAS_H), BG_COLOR)
 
-    # --- 2x2 collage of this batch's own story photos ---
+    # --- 2x2 collage of each story's own already-rendered hook slide ---
     cols, rows = 2, 2
     tile_w, tile_h = CANVAS_W // cols, CANVAS_H // rows
-    # Pair each photo with its own hook line BEFORE filtering out
-    # missing/unreadable photos, so a caption never ends up attached to
-    # the wrong tile if an earlier story in the batch has no photo.
-    raw_lines = hook_lines or [None] * len(photo_paths or [])
-    pairs = [
-        (p, h) for p, h in zip(photo_paths or [], raw_lines)
-        if p and _os.path.exists(p)
-    ]
-    usable_photos = [p for p, _ in pairs]
-    usable_hook_lines = [h for _, h in pairs]
-    tile_lines = []  # the hook line actually paired with each tile, in tile order (0-3)
+    usable = [p for p in (hook_slide_paths or []) if p and _os.path.exists(p)]
     for i in range(4):
-        photo = None
-        line = None
-        if usable_photos:
-            idx = i % len(usable_photos)
-            src = usable_photos[idx]
-            line = usable_hook_lines[idx]
+        tile = None
+        if usable:
+            src = usable[i % len(usable)]
             try:
-                photo = Image.open(src).convert("RGB")
-                photo = crop_to_fill(photo, tile_w + 2, tile_h + 2)
+                tile = Image.open(src).convert("RGB")
+                tile = crop_to_fill(tile, tile_w + 2, tile_h + 2)
             except Exception:
-                photo = None
-        if photo is None:
-            photo = generate_gradient_background(tile_w + 2, tile_h + 2, tag="NEWS")
-            if not usable_photos:
-                # No real photo anywhere in this batch, so there was
-                # nothing to pair/cycle above - fall back to a direct
-                # 1:1 mapping of story index to tile index instead.
-                line = raw_lines[i] if i < len(raw_lines) else None
+                tile = None
+        if tile is None:
+            tile = generate_gradient_background(tile_w + 2, tile_h + 2, tag="NEWS")
         r, c = divmod(i, cols)
-        canvas.paste(photo, (c * tile_w, r * tile_h))
-        tile_lines.append(line)
+        canvas.paste(tile, (c * tile_w, r * tile_h))
 
     # thin dividers between tiles for a clean "collage" edge
     draw = ImageDraw.Draw(canvas)
     draw.line([(tile_w, 0), (tile_w, CANVAS_H)], fill=BG_COLOR, width=3)
     draw.line([(0, tile_h), (CANVAS_W, tile_h)], fill=BG_COLOR, width=3)
 
-    # --- scrim: background images sit at ~50% opacity (a heavier dark
-    # overlay than the individual story slides use) so the collage stays
-    # readable while the headline's own metallic gradient stays legible ---
-    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 128))  # 128/255 ~= 50% dark -> ~50% image opacity
+    # --- light scrim: just enough to keep the brand name/subheading
+    # legible over whatever's directly behind them, without washing out
+    # each tile's own already-processed, already-legible headline ---
+    overlay = Image.new("RGBA", canvas.size, (12, 12, 14, 60))
     canvas = Image.alpha_composite(canvas.convert("RGBA"), overlay)
     draw = ImageDraw.Draw(canvas, "RGBA")
 
-    pad_x = 40
     white = (255, 255, 255, 255)
 
     # --- brand name, top, bright, tracked small caps + hairline rule ---
@@ -1224,77 +1188,29 @@ def build_ultimate_hook_slide(
     _draw_tracked_center_text(draw, brand_name.upper(), eyebrow_font, CANVAS_W / 2, 55, white, tracking=7)
     draw.line([(90, 120), (CANVAS_W - 90, 120)], fill=(255, 255, 255, 190), width=1)
 
-    # --- headline, centered vertically (nudged down from dead-center),
-    # using the EXACT same color resolution a normal story's own hook
-    # slide uses for THIS batch's theme (see build_news_card's
-    # color_mode block) - not a hardcoded look. "silver" theme ->
-    # flat bright white, "bronze_gold" -> flat bright gold, "warm_taupe"
-    # -> its solid champagne color. Whichever theme this batch rotated
-    # to is what the ultimate-hook headline shows too, same as every
-    # other slide in the batch. Via _draw_gradient_text, same renderer
-    # build_news_card uses. A soft black shadow is drawn first
-    # (gradient-filled text has no built-in shadow support) for
-    # legibility over a busy photo seam. ---
-    color_mode = theme.get("headline_color_mode", "gradient")
-    if color_mode == "white":
-        headline_gradient_stops = ["#ffffff"] * 5
-    elif color_mode == "solid":
-        headline_gradient_stops = [theme.get("headline_solid_color", "#ffffff")] * 5
-    else:
-        headline_gradient_stops = theme["gradient"]
-
-    headline_font, wrapped, line_h = _autofit_text(
-        draw, headline, FONT_HEADLINE, CANVAS_W - 2 * pad_x, 260,
-        max_size=100, min_size=48, variation="Bold", line_spacing_extra=10, side_margin=24,
-    )
-    block_h = line_h * len(wrapped)
-    text_y = (CANVAS_H - block_h) // 2 + 70
-    block_width = CANVAS_W - 2 * pad_x
-    for i, line in enumerate(wrapped):
-        bbox = draw.textbbox((0, 0), line, font=headline_font)
-        line_w = bbox[2] - bbox[0]
-        line_x = pad_x + (block_width - line_w) // 2 - bbox[0]
-        draw.text((line_x + 2, text_y + i * line_h + 3), line, font=headline_font, fill=(0, 0, 0, 150))
-    _draw_gradient_text(canvas, (pad_x, text_y), wrapped, headline_font, line_h, headline_gradient_stops,
-                         block_width=block_width, center=True)
-
-    # --- per-tile hook-line captions, positioned relative to the
-    # headline block we just computed above (text_y/block_h) so they
-    # never overlap it: row-1 tiles get their caption anchored just
-    # ABOVE the headline, row-2 tiles just BELOW it. ---
-    if tile_lines and any(tile_lines):
-        caption_font = _load_font(FONT_BODY, 30, variation="Bold")
-        caption_pad_x, caption_pad_y = 20, 8
-        row1_caption_bottom = text_y - 16       # bottom edge of row-1 captions
-        row2_caption_top = text_y + block_h + 16  # top edge of row-2 captions
-        for i in range(4):
-            line = tile_lines[i]
-            if not line:
-                continue
-            r, c = divmod(i, cols)
-            tile_cx = c * tile_w + tile_w / 2
-            max_text_w = tile_w - 2 * (pad_x - 10)
-            fitted = _truncate_to_width(draw, line, caption_font, max_text_w)
-            bbox = draw.textbbox((0, 0), fitted, font=caption_font)
-            text_w, text_h = bbox[2] - bbox[0], bbox[3] - bbox[1]
-            box_w, box_h = text_w + 2 * caption_pad_x, text_h + 2 * caption_pad_y
-            box_x0 = tile_cx - box_w / 2
-            box_y0 = (row1_caption_bottom - box_h) if r == 0 else row2_caption_top
-            box = [box_x0, box_y0, box_x0 + box_w, box_y0 + box_h]
-            draw.rounded_rectangle(box, radius=8, fill=(0, 0, 0, 102))
-            draw.text(
-                (box_x0 + caption_pad_x - bbox[0], box_y0 + caption_pad_y - bbox[1]),
-                fitted, font=caption_font, fill=white,
-            )
-
-    # --- subheading, bottom, bright ---
-    sub_font = _load_font(FONT_TAG, 36)
-    _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, CANVAS_H - 95, white)
+    # --- subheading, positioned at the vertical middle of the BOTTOM
+    # row of tiles - on a solid, SHARP-CORNERED (draw.rectangle, not
+    # rounded_rectangle) 40%-opacity black backing box so it stays
+    # legible over whatever tile content sits behind it. Font is
+    # FONT_BODY - the SAME font each of the 4 hook slides already uses
+    # for its own headline (see build_news_card's default
+    # `headline_font = headline_font or FONT_BODY`) - not FONT_TAG,
+    # so this line visually matches the headlines in the tiles behind
+    # it rather than the small brand-name/tag typeface. ---
+    sub_font = _load_font(FONT_BODY, 36)
+    sub_bbox = draw.textbbox((0, 0), subheading, font=sub_font)
+    sub_w, sub_h = sub_bbox[2] - sub_bbox[0], sub_bbox[3] - sub_bbox[1]
+    sub_pad_x, sub_pad_y = 24, 14
+    sub_center_y = (CANVAS_H // 2 + CANVAS_H) // 2  # vertical middle of the bottom tile row
+    sub_box_w, sub_box_h = sub_w + 2 * sub_pad_x, sub_h + 2 * sub_pad_y
+    sub_box_x0 = CANVAS_W / 2 - sub_box_w / 2
+    sub_box_y0 = sub_center_y - sub_box_h / 2
+    sub_box = [sub_box_x0, sub_box_y0, sub_box_x0 + sub_box_w, sub_box_y0 + sub_box_h]
+    draw.rectangle(sub_box, fill=(0, 0, 0, 102))  # 102/255 = 40% opacity, sharp corners
+    sub_text_y = sub_box_y0 + sub_pad_y - sub_bbox[1]
+    _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, sub_text_y, white)
 
     canvas = canvas.convert("RGB")
-    if _os.path.exists(theme["logo"]):
-        _draw_logo(canvas, pad_x, CANVAS_H - 40, logo_size=100, logo_path=theme["logo"])
-
     canvas.save(out_path, "JPEG", quality=92)
     return out_path
 
