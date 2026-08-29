@@ -1094,6 +1094,7 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
     # Hindi carousel can end up with fewer than len(results) stories
     # if the English batch pulled in global coverage.
     all_slide_paths_hi, caption_hi = [], "" 
+    hi_only_extra_results = []  # extra stories pulled in ONLY for Hindi (see backfill below) - not part of the English carousel, but still need marking as posted so they aren't re-surfaced later
     if POST_HINDI:
         print(f"  -> [hi] translating and building the Hindi carousel for the same {len(results)} stories...")
         hi_results = []
@@ -1109,6 +1110,61 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
             r["headline_hi"] = hi["headline_hi"]
             r["caption_paragraph_hi"] = hi.get("caption_paragraph_hi") or ""
             hi_results.append(r)
+
+        # Backfill: English picks its story_count stories from a combined
+        # India+global ranked pool, so its top picks are often
+        # global/international stories that just outrank India coverage
+        # on priority_score - the loop above then has nothing to work
+        # with for those slots. Rather than let the Hindi carousel simply
+        # come up short (or empty) whenever that happens, keep scanning
+        # FURTHER DOWN the same `articles` pool (past whatever English
+        # used) for additional India-related, non-duplicate candidates
+        # and build those out fresh, purely to top up the Hindi post back
+        # up to story_count. This never changes what English posts.
+        if len(hi_results) < story_count:
+            used_links = {r["link"] for r in results}
+            needed = story_count - len(hi_results)
+            print(f"  -> [hi] only {len(hi_results)}/{story_count} stories after the India-relevance "
+                  f"filter - scanning for {needed} more India-related candidate(s) to backfill with...")
+            for article in articles:
+                if len(hi_results) >= story_count:
+                    break
+                link = article.get("link", "")
+                if not link or link in used_links:
+                    continue
+                if not article.get("is_india_related", True):
+                    continue
+                if is_duplicate_story(article["title"], link, recent_titles=recent_titles):
+                    continue
+
+                extra = _build_post(article, theme=theme, build_full_caption=False)
+                if extra is None:
+                    continue  # no usable image/text for this one either - try the next candidate
+                used_links.add(link)
+                recent_titles.append(article["title"])
+                extra["slide_paths"] = extra["slide_paths"][:images_per_story]
+
+                hi = _build_hindi_slides(extra, theme=theme)
+                if hi is None:
+                    continue  # translation failed - skip, keep scanning
+                extra["slide_paths_hi"] = hi["slide_paths"][:images_per_story]
+                extra["detail_hi"] = hi["detail_hi"]
+                extra["headline_hi"] = hi["headline_hi"]
+                extra["caption_paragraph_hi"] = hi.get("caption_paragraph_hi") or ""
+
+                hi_only_extra_results.append(extra)
+                hi_results.append(extra)
+                print(f"  -> [hi] backfilled priority #{extra.get('priority_rank')} India-related "
+                      f"story ({len(hi_results)}/{story_count}): {extra['title'][:60]}")
+
+            if len(hi_results) < story_count:
+                print(f"  -> [hi] still only found {len(hi_results)}/{story_count} usable India-related "
+                      f"stories this run - posting a {len(hi_results)}-story Hindi carousel instead.")
+
+        # Same lead-with-sensitive-stories ordering as the English post
+        # (see the results.sort() above) - keeps the two language
+        # carousels consistent when a sensitive story is present.
+        hi_results.sort(key=lambda r: not r.get("is_sensitive", False))
 
         if hi_results:
             # Same collage idea as the English hook slide, but Hindi text
@@ -1140,6 +1196,15 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
         return {"results": results, "media_id": None, "caption": caption,
                 "media_id_hi": None, "caption_hi": caption_hi}
 
+    def _mark_hi_only_extras_posted(ig_media_id_hi):
+        # hi_only_extra_results are stories the Hindi backfill above
+        # pulled in that AREN'T part of the English carousel/results -
+        # mark them posted too (tagged with the Hindi media id, or None
+        # in pre-gen/dry-run-equivalent paths) so they don't get
+        # resurfaced and re-picked by a later slot.
+        for r in hi_only_extra_results:
+            mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=ig_media_id_hi)
+
     print(f"  -> uploading {len(all_slide_paths)} image(s) to Supabase Storage...")
     public_urls = upload_carousel_images(all_slide_paths)
     public_urls_hi = upload_carousel_images(all_slide_paths_hi) if all_slide_paths_hi else []
@@ -1152,6 +1217,7 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
             mark_as_posted(r["title"], r["link"], r["source"], ig_media_id=None)
             r["media_id"] = None
             r["image_urls"] = public_urls
+        _mark_hi_only_extras_posted(None)
         return {"results": results, "media_id": None, "caption": caption, "image_urls": public_urls,
                 "media_id_hi": None, "caption_hi": caption_hi, "image_urls_hi": public_urls_hi}
 
@@ -1210,6 +1276,14 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
             else:
                 print("  -> [hi] confirmed: it genuinely did not post this run. The English post "
                       "already went out fine - this only affects the Hindi page.")
+
+        if media_id_hi:
+            # Only mark the Hindi-only backfill stories as posted once we
+            # know the Hindi carousel actually went out - if it genuinely
+            # failed, leave them unmarked (same as the English failure
+            # path above) so they're still available to retry/backfill
+            # with on a later run instead of being silently lost.
+            _mark_hi_only_extras_posted(media_id_hi)
 
     return {"results": results, "media_id": media_id, "caption": caption, "image_urls": public_urls,
             "media_id_hi": media_id_hi, "caption_hi": caption_hi, "image_urls_hi": public_urls_hi}
