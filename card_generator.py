@@ -1192,12 +1192,13 @@ def build_ultimate_hook_slide(
     # row of tiles - on a solid, SHARP-CORNERED (draw.rectangle, not
     # rounded_rectangle) 40%-opacity black backing box so it stays
     # legible over whatever tile content sits behind it. Font is
-    # FONT_BODY - the SAME font each of the 4 hook slides already uses
-    # for its own headline (see build_news_card's default
-    # `headline_font = headline_font or FONT_BODY`) - not FONT_TAG,
-    # so this line visually matches the headlines in the tiles behind
-    # it rather than the small brand-name/tag typeface. ---
-    sub_font = _load_font(FONT_BODY, 36)
+    # FONT_BODY loaded with variation="Bold" - the SAME font file AND
+    # weight each of the 4 hook slides actually renders its own headline
+    # with (see build_news_card -> _autofit_text(..., variation="Bold")
+    # on the `headline_font = headline_font or FONT_BODY` default) - not
+    # FONT_TAG, so this line visually matches the headlines in the tiles
+    # behind it rather than the small brand-name/tag typeface. ---
+    sub_font = _load_font(FONT_BODY, 36, variation="Bold")
     sub_bbox = draw.textbbox((0, 0), subheading, font=sub_font)
     sub_w, sub_h = sub_bbox[2] - sub_bbox[0], sub_bbox[3] - sub_bbox[1]
     sub_pad_x, sub_pad_y = 24, 14
@@ -1206,7 +1207,18 @@ def build_ultimate_hook_slide(
     sub_box_x0 = CANVAS_W / 2 - sub_box_w / 2
     sub_box_y0 = sub_center_y - sub_box_h / 2
     sub_box = [sub_box_x0, sub_box_y0, sub_box_x0 + sub_box_w, sub_box_y0 + sub_box_h]
-    draw.rectangle(sub_box, fill=(0, 0, 0, 102))  # 102/255 = 40% opacity, sharp corners
+    # NOTE: ImageDraw.Draw(canvas, "RGBA").rectangle(..., fill=(0,0,0,102)) does
+    # NOT alpha-blend onto the image below it - it writes the raw (0,0,0) RGB
+    # straight into those pixels and only stamps 102 into the alpha channel.
+    # That alpha channel is then discarded by the final canvas.convert("RGB"),
+    # so the box always renders fully opaque no matter the alpha value used.
+    # Fix: draw the box on its own transparent layer and alpha_composite that
+    # layer onto the canvas, so the 40% opacity actually blends with whatever
+    # tile content sits behind it.
+    box_overlay = Image.new("RGBA", canvas.size, (0, 0, 0, 0))
+    ImageDraw.Draw(box_overlay).rectangle(sub_box, fill=(0, 0, 0, 102))  # 102/255 = 40% opacity, sharp corners
+    canvas = Image.alpha_composite(canvas, box_overlay)
+    draw = ImageDraw.Draw(canvas, "RGBA")
     sub_text_y = sub_box_y0 + sub_pad_y - sub_bbox[1]
     _draw_tracked_center_text(draw, subheading, sub_font, CANVAS_W / 2, sub_text_y, white)
 
