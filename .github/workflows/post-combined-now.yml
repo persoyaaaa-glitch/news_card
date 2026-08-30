@@ -64,6 +64,7 @@ jobs:
           IG_ACCESS_TOKEN_HI: ${{ secrets.IG_ACCESS_TOKEN_HI }}
           POST_HINDI_PAGE: ${{ secrets.POST_HINDI_PAGE }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           META_APP_ID: ${{ secrets.META_APP_ID }}
           META_APP_SECRET: ${{ secrets.META_APP_SECRET }}
         run: >
