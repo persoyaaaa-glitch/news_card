@@ -413,7 +413,8 @@ def _apply_target_count(state: dict, target_count) -> bool:
         ]
         to_remove = sorted(removable_indices[:remove_n], reverse=True)
         for i in to_remove:
-            for key in ("planned_times", "posted", "planned_times_hi", "posted_hi", "notified", "notified_hi"):
+            for key in ("planned_times", "posted", "planned_times_hi", "posted_hi",
+                        "notified", "notified_hi", "skipped", "skipped_hi"):
                 if key in state and i < len(state[key]):
                     del state[key][i]
         print(f"[{now_ist().isoformat()}] Schedule override: removed {len(to_remove)} "
@@ -445,6 +446,10 @@ def _apply_target_count(state: dict, target_count) -> bool:
             state["notified"].append(False)
         if "notified_hi" in state:
             state["notified_hi"].append(False)
+        if "skipped" in state:
+            state["skipped"].append(False)
+        if "skipped_hi" in state:
+            state["skipped_hi"].append(False)
         added += 1
 
     dropped = add_n - added
