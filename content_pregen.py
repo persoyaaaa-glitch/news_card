@@ -74,7 +74,16 @@ def _save_slots_state(slots_state: dict):
 
 
 def _already_built(slots_state: dict, index: int) -> bool:
-    return any(s.get("index") == index and s.get("image_urls") and s.get("caption") and s.get("image_urls_hi") and s.get("caption_hi") for s in slots_state["slots"])
+    # English-only check on purpose: this gates the 30-min-tick
+    # background pass (pregenerate_today), which must NOT keep
+    # rebuilding (discarding good English content + burning fresh
+    # candidate stories, which get marked spent the instant they're
+    # fetched) just because Hindi hasn't landed yet. The full
+    # bilingual-readiness check lives in force_build_slot() instead,
+    # used only by the manual "Generate now" button and the
+    # auto-fire fallback in daily_scheduler.py - both far rarer than
+    # every 30 minutes.
+    return any(s.get("index") == index and s.get("image_urls") and s.get("caption") for s in slots_state["slots"])
 
 
 def _slot_from_candidates(candidates: list, selected_ids: list,
@@ -282,8 +291,11 @@ def force_build_slot(index: int) -> bool:
         return False
 
     slots_state = _load_slots_state()
-    if _already_built(slots_state, index):
-        print(f"Slot {index} already has content built - nothing to do.")
+    existing = next((s for s in slots_state["slots"] if s.get("index") == index), None)
+    fully_ready = bool(existing and existing.get("image_urls") and existing.get("caption")
+                        and existing.get("image_urls_hi") and existing.get("caption_hi"))
+    if fully_ready:
+        print(f"Slot {index} already has content built (both languages) - nothing to do.")
         return True
 
     ok = _build_one_slot(index, planned_times[index], len(planned_times), slots_state)
