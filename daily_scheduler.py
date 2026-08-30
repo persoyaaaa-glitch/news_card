@@ -925,7 +925,16 @@ def _attempt_fire_slot(state: dict, lang: str, due_index: int, times_key: str,
     try:
         prebuilt = _get_prebuilt_slot(due_index)
         if prebuilt:
-            posted_ok = _publish_prebuilt_slot(prebuilt, lang)
+            ready = ((prebuilt.get("image_urls_hi") and prebuilt.get("caption_hi"))
+                     if lang == "hi" else
+                     (prebuilt.get("image_urls") and prebuilt.get("caption")))
+            if not ready:
+                print(f"  -> pre-built slot exists but {lang} content isn't ready yet - "
+                      f"forcing a build attempt now instead of waiting for the next tick.")
+                import content_pregen
+                content_pregen.force_build_slot(due_index)
+                prebuilt = _get_prebuilt_slot(due_index)
+            posted_ok = _publish_prebuilt_slot(prebuilt, lang) if prebuilt else False
         else:
             print(f"  -> no pre-built content found for this slot - building fresh now ({lang}).")
             # NOTE: run_combined() has no per-language selector - it always
