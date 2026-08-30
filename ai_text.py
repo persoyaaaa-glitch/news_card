@@ -130,6 +130,39 @@ RETRY_BACKOFF_SECONDS = (15, 30, 60)  # used when Google doesn't send a Retry-Af
 _quota_exhausted = False
 
 
+def rotate_to_next_key():
+    """
+    Proactively advances to the next configured Gemini key, independent
+    of whether the current key has actually failed - call this once
+    after each carousel (one story's worth of Gemini calls: hook/
+    detail/caption/hashtags, or one Hindi translation pass) is fully
+    built, so load is spread round-robin across every configured key
+    from the start of a run instead of only ever touching key #2/#3
+    reactively, after key #1 has already failed enough times to trip
+    _mark_current_key_exhausted(). Spreading calls proactively also
+    means each individual key accumulates its per-minute/per-day usage
+    more slowly, which is the actual point of having multiple keys.
+
+    A no-op if only one key is configured. Skips over any key already
+    confirmed exhausted this run (from a real 429/timeout failure) so
+    rotation never wastes a call on a key already known to be dead;
+    if every other key is exhausted, stays on the current one (the
+    existing _quota_exhausted breaker in _call_gemini already handles
+    the "every key is dead" case).
+    """
+    global _current_key_idx
+    if len(GEMINI_API_KEYS) <= 1:
+        return
+    start = _current_key_idx
+    candidate = (start + 1) % len(GEMINI_API_KEYS)
+    hops = 0
+    while candidate in _exhausted_key_indices and hops < len(GEMINI_API_KEYS):
+        candidate = (candidate + 1) % len(GEMINI_API_KEYS)
+        hops += 1
+    if candidate != start and candidate not in _exhausted_key_indices:
+        _current_key_idx = candidate
+
+
 def _mark_current_key_exhausted():
     """
     Called when the key at GEMINI_API_KEYS[_current_key_idx] has just
@@ -317,8 +350,23 @@ def _call_gemini(prompt: str = None, timeout: int = 30, max_output_tokens: int =
 
             except (requests.Timeout, requests.ConnectionError) as e:
                 if attempt >= MAX_RETRIES:
-                    print(f"[ai_text] Gemini request failed after {MAX_RETRIES} retries: {e}")
-                    return None
+                    # Previously this just gave up here (`return None`)
+                    # without ever rotating keys - meaning repeated
+                    # timeouts (as opposed to 429s) never benefited from
+                    # having multiple GEMINI_API_KEYS configured at all,
+                    # since only the 429 branch above called
+                    # _mark_current_key_exhausted(). A key can time out
+                    # persistently for reasons other than a global Gemini
+                    # outage (e.g. that specific Google Cloud project
+                    # being throttled/slow), so treat repeated timeouts
+                    # the same way as confirmed quota exhaustion: rotate
+                    # to the next configured key and retry fresh there,
+                    # only giving up for good once every key has failed.
+                    print(f"[ai_text] Gemini key #{_current_key_idx + 1} still timing out "
+                          f"after {MAX_RETRIES} retries ({e}) - rotating to the next "
+                          f"configured key instead of giving up.")
+                    _mark_current_key_exhausted()
+                    break  # break inner retry loop, outer loop retries fresh on new key
                 wait_s = RETRY_BACKOFF_SECONDS[attempt]
                 print(f"[ai_text] Gemini request failed ({e}) - retrying in {wait_s}s "
                       f"({attempt + 1}/{MAX_RETRIES})...")

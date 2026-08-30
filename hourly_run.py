@@ -55,6 +55,7 @@ from ai_text import (
     format_instagram_caption, generate_digest_caption_and_hashtags,
     generate_digest_hashtags,
     translate_story_to_hindi, translate_text_to_hindi, translate_caption_to_hindi,
+    rotate_to_next_key,
 )
 
 # Master switch for the Hindi sister page. Set POST_HINDI_PAGE=false in
@@ -517,6 +518,7 @@ def run(max_attempts: int = 30, apply_jitter: bool = True, dry_run: bool = False
         result = _build_post(article)
         if result is None:
             continue  # no usable image, or no description slide could be built - try the next one
+        rotate_to_next_key()  # spread Gemini load round-robin across configured keys after each carousel
         slide_paths, caption = result["slide_paths"], result["caption"]
 
         if dry_run:
@@ -619,6 +621,7 @@ def run_multiple(story_count: int = 10, max_attempts: int = 80, apply_jitter: bo
         result = _build_post(article)
         if result is None:
             continue  # no usable image, or no description slide could be built - try the next one
+        rotate_to_next_key()  # spread Gemini load round-robin across configured keys after each carousel
         slide_paths, caption = result["slide_paths"], result["caption"]
 
         if dry_run:
@@ -721,6 +724,7 @@ def run_batch(story_count: int = 10, max_attempts: int = 60, out_dir: str = None
         result = _build_post(article, out_dir=out_dir, base_filename=base_filename)
         if result is None:
             continue  # no usable image, or no description slide could be built - try the next one
+        rotate_to_next_key()  # spread Gemini load round-robin across configured keys after each carousel
         rank_note = f" | priority=#{result['priority_rank']}" if result.get("priority_rank") else ""
         print(f"  -> built {len(result['slide_paths'])} slide(s) | "
               f"image={'real' if result['used_real_image'] else 'generated'} | "
@@ -1030,6 +1034,7 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
         result = _build_post(article, theme=theme, build_full_caption=False)
         if result is None:
             continue  # no usable image, or no description slide could be built - try the next one
+        rotate_to_next_key()  # spread Gemini load round-robin across configured keys after each carousel
 
         # Cap this story's own slide count so the combined total stays
         # at/under story_count * images_per_story.
@@ -1101,6 +1106,7 @@ def run_combined(story_count: int = 4, images_per_story: int = 2, max_attempts: 
                 print(f"  -> [hi] skipping non-India story (not relevant for Hindi audience): {r['title'][:60]}")
                 continue
             hi = _build_hindi_slides(r, theme=theme)
+            rotate_to_next_key()  # spread Gemini load round-robin across configured keys after each carousel
             if hi is None:
                 continue  # translation failed for this one story - it's simply absent from the Hindi post
             r["slide_paths_hi"] = hi["slide_paths"][:images_per_story]
@@ -1387,6 +1393,7 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
         result = _build_post(article, theme=theme, build_full_caption=False)
         if result is None:
             continue
+        rotate_to_next_key()  # spread Gemini load round-robin across configured keys after each carousel
         result["slide_paths"] = result["slide_paths"][:images_per_story]
         recent_titles.append(title)
         results.append(result)
@@ -1409,6 +1416,7 @@ def build_candidates(candidate_count: int = 6, images_per_story: int = 2, max_at
                 r["caption_paragraph_hi"] = ""
                 continue
             hi = _build_hindi_slides(r, theme=theme)
+            rotate_to_next_key()  # spread Gemini load round-robin across configured keys after each carousel
             if hi is None:
                 r["slide_paths_hi"] = []
                 r["headline_hi"] = ""
