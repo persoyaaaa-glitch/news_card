@@ -74,7 +74,7 @@ def _save_slots_state(slots_state: dict):
 
 
 def _already_built(slots_state: dict, index: int) -> bool:
-    return any(s.get("index") == index and s.get("image_urls") for s in slots_state["slots"])
+    return any(s.get("index") == index and s.get("image_urls") and s.get("image_urls_hi") for s in slots_state["slots"])
 
 
 def _slot_from_candidates(candidates: list, selected_ids: list,
