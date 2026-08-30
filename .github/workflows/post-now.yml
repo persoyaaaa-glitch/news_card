@@ -52,27 +52,13 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Build content for this slot first, if it isn't built yet
-        # Best-effort - if this step fails, or the slot already has
-        # content, post_now() below still works fine: for a slot with
-        # no pre-built content it falls back to building fresh content
-        # on the spot for this one language, exactly like the normal
-        # scheduler does for any other unbuilt slot.
-        continue-on-error: true
-        env:
-          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
-          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
-          IG_USER_ID: ${{ secrets.IG_USER_ID }}
-          IG_ACCESS_TOKEN: ${{ secrets.IG_ACCESS_TOKEN }}
-          IG_USER_ID_HI: ${{ secrets.IG_USER_ID_HI }}
-          IG_ACCESS_TOKEN_HI: ${{ secrets.IG_ACCESS_TOKEN_HI }}
-          POST_HINDI_PAGE: ${{ secrets.POST_HINDI_PAGE }}
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
-        run: python content_pregen.py --slot "${{ inputs.slot_index }}"
-
       - name: Post it now
+        # No separate "build content first" step here on purpose:
+        # daily_scheduler.py's post_now() -> _attempt_fire_slot()
+        # already forces a build itself (via content_pregen.force_build_slot)
+        # if this slot/language isn't ready yet, so a second pre-step
+        # here would just spend a second batch of candidate stories
+        # on the same click.
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
