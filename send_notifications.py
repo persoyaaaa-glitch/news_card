@@ -79,8 +79,18 @@ def _send_to_all(title: str, body: str, tag: str):
             print(f"[send_notifications] sent to subscription #{sub['id']}")
         except WebPushException as e:
             status = getattr(e.response, "status_code", None)
-            if status in (404, 410):
-                print(f"[send_notifications] subscription #{sub['id']} is dead - removing it")
+            body = getattr(e.response, "text", "") or ""
+            # A 403 whose body specifically complains about a VAPID
+            # credential/subscription mismatch means this subscription
+            # was created against a public key that's since been
+            # rotated out - it can NEVER succeed again (only a fresh
+            # subscribe from the browser against the current public
+            # key fixes it), so treat it as dead exactly like 404/410
+            # rather than retrying it forever on every future run.
+            vapid_mismatch = status == 403 and "do not correspond to the credentials" in body
+            if status in (404, 410) or vapid_mismatch:
+                reason = "VAPID key mismatch (stale, rotated out)" if vapid_mismatch else "dead"
+                print(f"[send_notifications] subscription #{sub['id']} is {reason} - removing it")
                 _remove_subscription(sub["id"])
             else:
                 print(f"[send_notifications] push failed for #{sub['id']}: {e}")
