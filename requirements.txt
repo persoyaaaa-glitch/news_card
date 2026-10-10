@@ -6,6 +6,6 @@ lxml
 supabase
 python-dotenv
 googlenewsdecoder
-selectolax
+selectolax<1.0
 pysocks
 pywebpush
