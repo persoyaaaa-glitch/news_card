@@ -5,7 +5,7 @@ feedparser
 lxml
 supabase
 python-dotenv
-googlenewsdecoder
+googlenewsdecoder==0.1.7
 selectolax<1.0
 pysocks
 pywebpush
